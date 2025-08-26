@@ -72,7 +72,7 @@ prepare_volume_mounts() {
                 echo "[WARN] Skipping invalid dataset name: $dataset_path_clean"
                 continue
             }
-            VOLUME_FLAGS+=" -v ${dataset_path_clean}:/workspace/mounted_datasets/${dataset_name}/"
+            VOLUME_FLAGS+=" -v ${dataset_path_clean}:/workspace/datasets/${dataset_name}/"
         done
         echo "[INFO] Volume mount list parsed from $DATASETS_FILE"
     else
@@ -93,7 +93,7 @@ run_container() {
 
 init_container_filesystem() {
     docker exec "$CONTAINER_NAME" mkdir -p /workspace/mounted_datasets
-    echo "[INFO] Created /workspace/mounted_datasets in container"
+    echo "[INFO] Created /workspace/datasets in container"
 
     docker exec "$CONTAINER_NAME" ln -sf /opt/requirements.txt /workspace/requirements.txt
     echo "[INFO] Created symbolic link for requirements.txt"
