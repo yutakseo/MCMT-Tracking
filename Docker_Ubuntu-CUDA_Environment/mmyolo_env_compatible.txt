@@ -1,0 +1,5 @@
+# OpenMMLab Core
+mmcv==2.0.1 --find-links https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
+mmdet==3.0.0
+mmengine==0.10.3
+#mmyolo는 로컬 설치
