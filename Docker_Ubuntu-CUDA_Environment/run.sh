@@ -7,8 +7,8 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-DOCKER_IMAGE="ubuntu-cuda-env"
-CONTAINER_NAME="ubuntu-cuda-env-container"
+DOCKER_IMAGE="aei_with_tracking_env"
+CONTAINER_NAME="MCMT-container"
 DOCKERFILE_PATH="${SCRIPT_DIR}/Dockerfile"
 DATASETS_FILE="${SCRIPT_DIR}/___DATASETS___.list"
 

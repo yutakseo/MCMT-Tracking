@@ -1,12 +1,11 @@
 mounted_datasets/
 workspace/aei_with_mmtrack/mmyolo/checkpoint/*.pth
 results/
-/*.pth
+results/*
 *.pth
 *.pt
 *.log
 *.ckpt
-results/*
-*.mp4*.mp4
+*.mp4
 *.mov
 *.avi
