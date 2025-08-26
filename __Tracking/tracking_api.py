@@ -2,7 +2,7 @@ from __Tracking.ByteTrack.yolox.tracker.byte_tracker import BYTETracker
 import cv2, os
 import numpy as np
 from hashlib import md5
-from collections import defaultdict, deque  # ✅ 추가
+from collections import defaultdict, deque
 
 class TrackerAPI:
     def __init__(self, args, detector) -> None:
