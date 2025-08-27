@@ -1,4 +1,4 @@
-# /workspace/__Detection/tools/show.py
+# /workspace/tools/show.py
 import os
 import cv2
 import numpy as np
