@@ -71,8 +71,8 @@ class PlanProjector:
         """
         ip = np.asarray(image_pts, np.float32)
         pp = np.asarray(plan_pts,  np.float32)
-        if ip.shape[0] < 4 or pp.shape[0] < 4:
-            raise ValueError("Need >= 4 point correspondences.")
+        if ip.shape[0] < 4 or pp.shape[0] < 4 or ip.shape[0] != pp.shape[0]:
+            raise ValueError("Need >= 4 correspondences and the same number of image_pts and plan_pts.")
 
         H, mask = cv2.findHomography(ip, pp, cv2.RANSAC, ransacReprojThreshold=ransac_thresh)
         if H is None:
@@ -94,20 +94,25 @@ class PlanProjector:
     @staticmethod
     def _xyxy_from_any(bbox: Union[list, np.ndarray]) -> np.ndarray:
         """
-        bbox가 tlwh([x,y,w,h]) 또는 xyxy([x1,y1,x2,y2])일 수 있으므로 xyxy로 표준화
+        bbox가 tlwh([x,y,w,h]) 또는 xyxy([x1,y1,x2,y2])일 수 있으므로 xyxy로 표준화.
+        우선 xyxy로 그럴듯하면 xyxy, 아니면 tlwh를 xyxy로 변환.
         """
         b = np.asarray(bbox, dtype=np.float32).reshape(-1)
         if b.shape[0] < 4:
             raise ValueError("bbox length must be >= 4")
 
-        x1, y1 = b[0], b[1]
-        # tlwh로 판단: w,h > 0 이고 너무 큰 값이 아닌 경우
-        if b[2] > 0 and b[3] > 0 and (b[2] + b[3]) < 1e6:
-            w, h = b[2], b[3]
-            return np.array([x1, y1, x1 + w, y1 + h], dtype=np.float32)
+        x1, y1, a, b2 = b[0], b[1], b[2], b[3]
 
-        # 그 외는 xyxy로 간주 후 정렬
-        x2, y2 = b[2], b[3]
+        # xyxy로 그럴듯한 경우(x2>x1, y2>y1)
+        if a > x1 and b2 > y1:
+            return np.array([x1, y1, a, b2], dtype=np.float32)
+
+        # tlwh로 그럴듯한 경우(w>0, h>0)
+        if a > 0 and b2 > 0:
+            return np.array([x1, y1, x1 + a, y1 + b2], dtype=np.float32)
+
+        # 마지막 방어: 정렬해서 xyxy 반환
+        x2, y2 = a, b2
         x1, y1, x2, y2 = min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
         return np.array([x1, y1, x2, y2], dtype=np.float32)
 
@@ -144,14 +149,15 @@ class PlanProjector:
         Parameters
         ----------
         dets_frame : [{'id':tid, 'bbox':tlwh or xyxy, 'score':...}, ...]
-        mode : 'center' | 'corners'
+        mode : 'center' | 'bottom_center' | 'corners'
             - center: 중심점만 투영 (일반적으로 안정적)
+            - bottom_center: bbox 중앙-아래 점 투영(지면 접점 근사)
             - corners: 네 꼭짓점 폴리곤 투영
         draw : bool
             True면 도면 위에 그린 캔버스도 함께 반환
         image_pts : [(x1,y1), (x2,y2), ...] | None
             원 영상 좌표 (넘기면 이 호출에서 H를 새로 계산)
-        plan_pts  : [(X1,Y1), (X2,Y2), ...] | None
+        plan_pts  : [(X1,Y1), (X2,Y1), ...] | None
             도면 좌표 (넘기면 이 호출에서 H를 새로 계산)
         ransac_thresh : float
             findHomography RANSAC 임계값
@@ -159,15 +165,21 @@ class PlanProjector:
         Returns
         -------
         projected : List[DetItem]
-            center → 각 항목에 'pt': (X,Y)
+            center/bottom_center → 각 항목에 'pt': (X,Y)
             corners → 각 항목에 'quad': [(X1,Y1),...(X4,Y4)]
         canvas : np.ndarray | None
             draw=True일 때 도면 위 시각화 이미지
         """
+        # mode 정규화 (하이픈 표기 허용)
+        if mode == "bottom-center":
+            mode = "bottom_center"
+
         # 1) H 확보
         if image_pts is not None and plan_pts is not None:
             ip = np.asarray(image_pts, np.float32)
             pp = np.asarray(plan_pts,  np.float32)
+            if ip.shape[0] < 4 or pp.shape[0] < 4 or ip.shape[0] != pp.shape[0]:
+                raise ValueError("Need >= 4 correspondences and the same number of image_pts and plan_pts.")
             H, _ = cv2.findHomography(ip, pp, cv2.RANSAC, ransacReprojThreshold=ransac_thresh)
             if H is None:
                 raise RuntimeError("findHomography failed inside projection()")
@@ -182,27 +194,35 @@ class PlanProjector:
             bbox = d.get("bbox", d.get("box", d.get("tlwh", None)))
             if bbox is None:
                 continue
-            xyxy = self._xyxy_from_any(bbox)
-            x1, y1, x2, y2 = xyxy
+            x1, y1, x2, y2 = self._xyxy_from_any(bbox)
 
             item = dict(d)
             if mode == "center":
                 cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
                 p = self._project_points(H, np.array([[cx, cy]], np.float32))[0]
                 item["pt"] = (float(p[0]), float(p[1]))
-            else:
+
+            elif mode == "bottom_center":
+                cx, cy = (x1 + x2) * 0.5, y2
+                p = self._project_points(H, np.array([[cx, cy]], np.float32))[0]
+                item["pt"] = (float(p[0]), float(p[1]))
+
+            elif mode == "corners":
                 quad = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
                 quad_p = self._project_points(H, quad)
                 item["quad"] = [ (float(px), float(py)) for px, py in quad_p ]
+
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+
             projected.append(item)
 
             # 궤적 저장(옵션)
             if self.trails is not None and "id" in item:
                 tid = int(item["id"])
-                if mode == "center":
+                if mode in ("center", "bottom_center"):
                     self.trails[tid].append(item["pt"])
-                else:
-                    # corners인 경우에도 중심점으로 궤적 저장
+                elif mode == "corners":
                     cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
                     p = self._project_points(H, np.array([[cx, cy]], np.float32))[0]
                     self.trails[tid].append((float(p[0]), float(p[1])))
@@ -213,13 +233,15 @@ class PlanProjector:
             canvas = self.plan.copy()
             for d in projected:
                 col = (self.color_fn or self._default_color)(d)
-                if mode == "center":
+
+                if mode in ("center", "bottom_center"):
                     x, y = map(int, d["pt"])
                     cv2.circle(canvas, (x, y), 4, col, -1)
                     if "id" in d:
                         cv2.putText(canvas, f"ID:{int(d['id'])}", (x + 5, y - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
-                else:
+
+                elif mode == "corners":
                     quad = np.asarray(d["quad"], np.int32).reshape(-1, 1, 2)
                     cv2.polylines(canvas, [quad], False, col, 2)
                     if "id" in d:
@@ -256,6 +278,10 @@ class PlanProjector:
         frames(프레임별 dets 리스트)를 투영하여 도면 비디오로 저장.
         필요한 경우 호출마다 image_pts/plan_pts로 H를 계산.
         """
+        # mode 정규화 (하이픈 표기 허용)
+        if mode == "bottom-center":
+            mode = "bottom_center"
+
         h, w = self.plan.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
