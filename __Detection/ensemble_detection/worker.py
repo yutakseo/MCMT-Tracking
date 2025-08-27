@@ -6,7 +6,7 @@ class WorkerDetector:
         self.model = init_detector(
             config="/workspace/PretrainedModel_by_JeonYT/worker/yolov8x_signalman.py", 
             checkpoint="/workspace/PretrainedModel_by_JeonYT/worker/epoch_100.pth", 
-            device="cuda:0"
+            device="cuda:1"
         )
 
         self.class_names = [
