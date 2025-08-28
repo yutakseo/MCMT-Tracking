@@ -92,7 +92,7 @@ run_container() {
 }
 
 init_container_filesystem() {
-    docker exec "$CONTAINER_NAME" mkdir -p /workspace/mounted_datasets
+    docker exec "$CONTAINER_NAME" mkdir -p /workspace/datasets
     echo "[INFO] Created /workspace/datasets in container"
 
     docker exec "$CONTAINER_NAME" ln -sf /opt/requirements.txt /workspace/requirements.txt
