@@ -239,10 +239,10 @@ class TrackerAPI:
                 current_ids.add(tid)
 
                 color = self._color_from_id(tid)
-                cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
+                cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 10)
                 cv2.putText(frame, f"ID:{tid} {score:.2f}",
                             (x, max(0, y - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 10)
 
                 # 중심점 갱신
                 cx = x + bw * 0.5
