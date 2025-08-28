@@ -2,6 +2,8 @@ mounted_datasets/
 workspace/aei_with_mmtrack/mmyolo/checkpoint/*.pth
 results/
 results/*
+__pycache__
+*.pyc
 *.pth
 *.pt
 *.log
