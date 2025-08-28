@@ -8,7 +8,6 @@ from .engine.registry import register_detector
 
 @register_detector("worker")
 class WorkerDetector(DetectorBase):
-    # ---- 기본값(프로젝트 경로/라벨) ----
     DEFAULT_DEVICE = "cuda:1"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/worker/yolov8x_signalman.py"
     DEFAULT_CKPT   = "/workspace/PretrainedModel_by_JeonYT/worker/epoch_100.pth"
