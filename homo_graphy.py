@@ -22,7 +22,13 @@ class PlanProjector:
     color_fn : Callable[[DetItem], Tuple[int,int,int]] | None
         각 항목 색상 함수. None이면 기본 빨강.
     trail_len : int
-        궤적 길이(최근 좌표 저장 개수). 0이면 궤적 미사용.
+        궤적 길이(최근 좌표 저장 개수). 0이면 궤적 저장 안 함.
+    trail_ttl : int | None
+        궤적 생존 프레임 수(나이 기반). None이면 TTL 무제한(= trail_len만 적용).
+    line_thickness : int
+        궤적/폴리라인 선 굵기(px).
+    point_radius : int
+        점(원) 반지름(px).
     """
 
     def __init__(
@@ -30,7 +36,10 @@ class PlanProjector:
         plan_img_or_path: Union[str, np.ndarray],
         H: Optional[np.ndarray] = None,
         color_fn: Optional[Callable[[DetItem], Tuple[int,int,int]]] = None,
-        trail_len: int = 0
+        trail_len: int = 0,
+        trail_ttl: Optional[int] = None,
+        line_thickness: int = 2,
+        point_radius: int = 4,
     ) -> None:
         if isinstance(plan_img_or_path, str):
             plan = cv2.imread(plan_img_or_path)
@@ -48,7 +57,15 @@ class PlanProjector:
 
         self.color_fn = color_fn
         self.trail_len = max(0, int(trail_len))
-        self.trails = defaultdict(lambda: deque(maxlen=self.trail_len)) if self.trail_len > 0 else None
+        self.trail_ttl = int(trail_ttl) if trail_ttl is not None else None
+        self.line_thickness = int(line_thickness)
+        self.point_radius = int(point_radius)
+
+        # trails: id -> deque of {'pt': (x,y), 'age': int}
+        if self.trail_len > 0:
+            self.trails: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.trail_len))
+        else:
+            self.trails = None
 
     # -------------------- Homography 유틸 --------------------
     def set_homography(self, H: np.ndarray) -> None:
@@ -65,9 +82,6 @@ class PlanProjector:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         (image_pts ↔ plan_pts)으로 H를 계산하고 내부에 설정.
-
-        image_pts : [(x1,y1), (x2,y2), ...]  (영상 좌표)
-        plan_pts  : [(X1,Y1), (X2,Y2), ...]  (도면 좌표)
         """
         ip = np.asarray(image_pts, np.float32)
         pp = np.asarray(plan_pts,  np.float32)
@@ -133,6 +147,26 @@ class PlanProjector:
         h = md5(str(track_id).encode()).hexdigest()
         return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
+    # -------------------- Trail aging helper --------------------
+    def _age_and_prune_trails(self, current_ids: Optional[set] = None) -> None:
+        """모든 trail의 age를 +1 하고, trail_ttl 초과분 제거. 비어지면 id 삭제."""
+        if self.trails is None:
+            return
+        to_delete = []
+        for tid, dq in self.trails.items():
+            # age 증가
+            for i in range(len(dq)):
+                dq[i]["age"] += 1
+            # TTL 적용
+            if self.trail_ttl is not None:
+                while dq and dq[0]["age"] >= self.trail_ttl:
+                    dq.popleft()
+            # 완전히 비었고, 이번 프레임에도 등장 안 하면 정리
+            if not dq and (current_ids is None or tid not in current_ids):
+                to_delete.append(tid)
+        for tid in to_delete:
+            del self.trails[tid]
+
     # -------------------- 핵심: 한 프레임 투영/시각화 --------------------
     def projection(
         self,
@@ -153,22 +187,6 @@ class PlanProjector:
             - center: 중심점만 투영 (일반적으로 안정적)
             - bottom_center: bbox 중앙-아래 점 투영(지면 접점 근사)
             - corners: 네 꼭짓점 폴리곤 투영
-        draw : bool
-            True면 도면 위에 그린 캔버스도 함께 반환
-        image_pts : [(x1,y1), (x2,y2), ...] | None
-            원 영상 좌표 (넘기면 이 호출에서 H를 새로 계산)
-        plan_pts  : [(X1,Y1), (X2,Y1), ...] | None
-            도면 좌표 (넘기면 이 호출에서 H를 새로 계산)
-        ransac_thresh : float
-            findHomography RANSAC 임계값
-
-        Returns
-        -------
-        projected : List[DetItem]
-            center/bottom_center → 각 항목에 'pt': (X,Y)
-            corners → 각 항목에 'quad': [(X1,Y1),...(X4,Y4)]
-        canvas : np.ndarray | None
-            draw=True일 때 도면 위 시각화 이미지
         """
         # mode 정규화 (하이픈 표기 허용)
         if mode == "bottom-center":
@@ -188,7 +206,13 @@ class PlanProjector:
                 raise RuntimeError("Homography (H) not set. Set it or pass image_pts/plan_pts.")
             H = self.H
 
-        # 2) 투영 변환
+        # 현재 프레임에 등장하는 ID 집합
+        current_ids = {int(d["id"]) for d in dets_frame if "id" in d}
+
+        # 2-a) Trail aging & TTL
+        self._age_and_prune_trails(current_ids=current_ids)
+
+        # 2-b) 투영 변환
         projected: List[DetItem] = []
         for d in dets_frame:
             bbox = d.get("bbox", d.get("box", d.get("tlwh", None)))
@@ -217,15 +241,10 @@ class PlanProjector:
 
             projected.append(item)
 
-            # 궤적 저장(옵션)
-            if self.trails is not None and "id" in item:
+            # 2-c) 궤적 업데이트(현재 프레임 점 추가, age=0)
+            if self.trails is not None and "id" in item and mode in ("center", "bottom_center"):
                 tid = int(item["id"])
-                if mode in ("center", "bottom_center"):
-                    self.trails[tid].append(item["pt"])
-                elif mode == "corners":
-                    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
-                    p = self._project_points(H, np.array([[cx, cy]], np.float32))[0]
-                    self.trails[tid].append((float(p[0]), float(p[1])))
+                self.trails[tid].append({"pt": item["pt"], "age": 0})
 
         # 3) 시각화
         canvas = None
@@ -236,30 +255,31 @@ class PlanProjector:
 
                 if mode in ("center", "bottom_center"):
                     x, y = map(int, d["pt"])
-                    cv2.circle(canvas, (x, y), 4, col, -1)
+                    cv2.circle(canvas, (x, y), self.point_radius, col, -1)  # 점 크기 적용
                     if "id" in d:
                         cv2.putText(canvas, f"ID:{int(d['id'])}", (x + 5, y - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
                 elif mode == "corners":
                     quad = np.asarray(d["quad"], np.int32).reshape(-1, 1, 2)
-                    cv2.polylines(canvas, [quad], False, col, 2)
+                    cv2.polylines(canvas, [quad], False, col, self.line_thickness)  # 선 굵기 적용
                     if "id" in d:
                         q0 = tuple(quad[0, 0])
                         cv2.putText(canvas, f"ID:{int(d['id'])}", (q0[0] + 5, q0[1] - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
 
-            # 궤적
+            # 궤적(살아있는 점만)
             if self.trails is not None:
-                for tid, pts in self.trails.items():
-                    if len(pts) >= 2:
-                        pts_np = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+                for tid, dq in self.trails.items():
+                    pts_alive = [tuple(map(int, p["pt"])) for p in dq
+                                 if (self.trail_ttl is None or p["age"] < self.trail_ttl)]
+                    if len(pts_alive) >= 2:
                         col = (self.color_fn or self._default_color)({"id": tid})
-                        cv2.polylines(canvas, [pts_np], False, col, 2)
-                    if len(pts) >= 1:
-                        cx, cy = map(int, pts[-1])
+                        pts_np = np.array(pts_alive, dtype=np.int32).reshape(-1, 1, 2)
+                        cv2.polylines(canvas, [pts_np], False, col, self.line_thickness)  # 선 굵기 적용
+                    if len(pts_alive) >= 1:
                         col = (self.color_fn or self._default_color)({"id": tid})
-                        cv2.circle(canvas, (cx, cy), 4, col, -1)
+                        cv2.circle(canvas, pts_alive[-1], self.point_radius, col, -1)  # 점 크기 적용
 
         return projected, canvas
 
