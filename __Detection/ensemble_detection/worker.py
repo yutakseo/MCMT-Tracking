@@ -1,6 +1,10 @@
 from mmdet.apis.inference import init_detector
 from mmdet.apis import inference_detector
+from _registry_ import register_detector
 
+
+
+@register_detector("worker")
 class WorkerDetector:
     def __init__(self):
         self.model = init_detector(
