@@ -41,7 +41,7 @@ def _cpu_decode_worker(args):
 
 def _iter_frames_parallel(video_path: str,
                           cpu_workers: int = 8,
-                          chunk_sec: float = 20.0):
+                          chunk_sec: float = 10.0):
     """
     전체 프레임을 (idx, frame[BGR]) 순서로 스트리밍.
     - 청크 단위로 병렬 디코딩하되,
