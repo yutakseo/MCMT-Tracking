@@ -2,6 +2,8 @@ mounted_datasets/
 datasets/
 datasets/*
 workspace/aei_with_mmtrack/mmyolo/checkpoint/*.pth
+workspace/PretrainedModel_by_JeonYT/
+PretrainedModel_by_JeonYT/new_weights/
 results/
 results/*
 __pycache__/
