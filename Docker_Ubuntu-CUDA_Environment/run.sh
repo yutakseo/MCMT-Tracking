@@ -70,7 +70,7 @@ run_container() {
   echo "[INFO] Starting container: $CONTAINER_NAME"
   docker run -dit --gpus all \
     $VOLUME_FLAGS \
-    --shm-size=64g \
+    --shm-size=16g \
     --restart unless-stopped \
     --name "$CONTAINER_NAME" \
     "$DOCKER_IMAGE" \
