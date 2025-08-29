@@ -1,19 +1,29 @@
-mounted_datasets/
-datasets/
-datasets/*
-workspace/aei_with_mmtrack/mmyolo/checkpoint/*.pth
-workspace/PretrainedModel_by_JeonYT/
-PretrainedModel_by_JeonYT/new_weights/
-results/
-results/*
+# === 데이터/결과 ===
+/mounted_datasets/
+/datasets/
+/workspace/aei_with_mmtrack/mmyolo/checkpoint/*.pth
+/workspace/PretrainedModel_by_JeonYT/
+/PretrainedModel_by_JeonYT/new_weights/
+/results/
+
+# 폴더 안에 설명 파일만 남기고 싶으면 (옵션)
+# !/datasets/.gitkeep
+# !/results/.gitkeep
+
+# === 파이썬 빌드/캐시 ===
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+*.log
+
+# === 모델/체크포인트 ===
 *.pth
 *.pt
-*.log
 *.ckpt
+
+# === 비디오/이미지 (주의: 전부 무시) ===
+# 필요 시 개별 폴더에서만 무시하도록 조정하세요.
 *.mp4
 *.mov
 *.avi
