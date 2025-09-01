@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Callable
 import time
 import cv2
 import numpy as np
@@ -9,11 +9,11 @@ import numpy as np
 from __Detection.detection_api import DetectionAPI
 from __Tracking.tracking_api import TrackerAPI
 from tools.homo_graphy import PlanProjector
-from stream import StreamCCTV
+from tools.stream import StreamCCTV
 
 
 # ----------------------------
-# Args
+# (선택) 추적기 설정값 컨테이너
 # ----------------------------
 @dataclass
 class Args:
@@ -30,7 +30,7 @@ class Args:
 class Camera:
     def __init__(
         self,
-        track_args: Args,
+        track_args: Any,
         cctv_url: str,
         cord_plan: str,
         plan_benchmark: List[Tuple[float, float]],
@@ -136,7 +136,36 @@ class Camera:
         return paused, None
 
     # ----------------------------
-    # Stream camera frames
+    # 투영 좌표만 뽑는 헬퍼
+    # ----------------------------
+    def get_object_positions(
+        self,
+        tracklets: Any,
+        mode: str = "bottom-center"
+    ) -> List[Tuple[float, float]]:
+        """
+        tracklets를 도면 좌표계로 투영한 결과 좌표를 반환
+        projected의 구조(딕셔너리/튜플 등)에 맞춰 파싱
+        """
+        projected, _ = self.projector.projection(dets_frame=tracklets, mode=mode, draw=False)
+        positions: List[Tuple[float, float]] = []
+
+        # projected 구조에 맞춰 유연하게 파싱
+        for item in projected:
+            # 예: {"id": 3, "plan_xy": (X, Y), ...}
+            if isinstance(item, dict) and "plan_xy" in item:
+                x, y = item["plan_xy"]
+                positions.append((float(x), float(y)))
+            # 예: (id, (X, Y)) 또는 (id, X, Y)
+            elif isinstance(item, (list, tuple)):
+                if len(item) >= 2 and isinstance(item[1], (list, tuple)) and len(item[1]) >= 2:
+                    positions.append((float(item[1][0]), float(item[1][1])))
+                elif len(item) >= 3 and all(isinstance(v, (int, float)) for v in item[1:3]):
+                    positions.append((float(item[1]), float(item[2])))
+        return positions
+
+    # ----------------------------
+    # Stream camera frames (원본 영상 스트리밍)
     # ----------------------------
     def stream_camera(
         self,
@@ -186,7 +215,7 @@ class Camera:
                 if action == "snapshot":
                     self.save_snapshot(frame, stem="camera_snap")
 
-                # (옵션) 표시 FPS 제한
+                # FPS 제한(선택)
                 if target_fps:
                     spent = time.time() - t0
                     to_wait = max(0.0, (1.0 / target_fps) - spent)
@@ -199,14 +228,22 @@ class Camera:
             self.close(window_name)
 
     # ----------------------------
-    # Stream plan view
+    # Stream plan (도면 스트리밍 + 좌표 반환/콜백)
     # ----------------------------
     def stream_plan(
         self,
         window_name: str = "Plan Stream",
         draw_on_plan: bool = True,
         target_fps: Optional[float] = None,
-    ) -> None:
+        return_positions: bool = False,
+        on_positions: Optional[Callable[[List[Tuple[float, float]]], None]] = None,
+        mode: str = "bottom-center",
+    ) -> Optional[List[Tuple[float, float]]]:
+        """
+        - 프레임 캡처 → 추적 → 도면 투영(canvas) → 실시간 표시
+        - 종료 시 마지막 프레임의 투영 좌표를 반환(return_positions=True일 때)
+        - 매 프레임 좌표를 외부로 넘기고 싶으면 on_positions 콜백을 사용
+        """
         self._running = True
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 1280, 720)
@@ -214,6 +251,7 @@ class Camera:
         paused = False
         t_last = time.time()
         fps = 0.0
+        last_positions: Optional[List[Tuple[float, float]]] = None
 
         try:
             while self._running:
@@ -229,16 +267,25 @@ class Camera:
 
                 projected, canvas = self.projector.projection(
                     dets_frame=tracklets,
-                    mode="bottom-center",
+                    mode=mode,
                     draw=draw_on_plan,
                 )
 
+                # 좌표 추출
+                positions = self.get_object_positions(tracklets, mode=mode)
+                last_positions = positions
+                if on_positions is not None:
+                    # 매 프레임 바깥으로 넘겨 활용 가능 (큐/네트워크/로깅 등)
+                    on_positions(positions)
+
+                # FPS
                 now = time.time()
                 dt = now - t_last
                 if dt > 0:
                     fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps > 0 else (1.0 / dt)
                 t_last = now
 
+                # Render
                 if canvas is not None:
                     n_tracks = len(tracklets) if hasattr(tracklets, "__len__") else 0
                     view = canvas.copy()
@@ -251,6 +298,7 @@ class Camera:
                     if action == "snapshot":
                         self.save_snapshot(canvas, stem="plan_snap")
 
+                # FPS 제한(선택)
                 if target_fps:
                     spent = time.time() - t0
                     to_wait = max(0.0, (1.0 / target_fps) - spent)
@@ -261,6 +309,8 @@ class Camera:
             pass
         finally:
             self.close(window_name)
+
+        return last_positions if return_positions else None
 
     # ----------------------------
     # Shutdown
@@ -279,27 +329,3 @@ class Camera:
                 pass
         cv2.destroyAllWindows()
 
-
-# ----------------------------
-# Example
-# ----------------------------
-if __name__ == "__main__":
-    args = Args()
-
-    cam_pts = [(1390, 521), (1618, 552), (1784, 578), (1112, 564)]
-    plan_pts = [(100, 200), (300, 210), (320, 400), (90, 380)]
-
-    cam = Camera(
-        track_args=args,
-        cctv_url="rtsp://user:pass@ip/stream",
-        cord_plan="/path/to/plan.png",
-        plan_benchmark=plan_pts,
-        cam_pts=cam_pts,
-        results_dir="./results",
-    )
-
-    # 원본 카메라 스트리밍
-    # cam.stream_camera(draw_tracks_on_frame=True, target_fps=30.0)
-
-    # 도면 스트리밍
-    cam.stream_plan(draw_on_plan=True, target_fps=30.0)
