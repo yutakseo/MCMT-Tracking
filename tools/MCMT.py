@@ -35,7 +35,6 @@ class Camera:
         cord_plan: str,
         plan_benchmark: List[Tuple[float, float]],
         cam_pts: List[Tuple[float, float]],
-        transport: str = "tcp",
         max_width: int = 1920,
         results_dir: str = "./results",
     ):
@@ -98,7 +97,7 @@ class Camera:
     # Capture raw frame
     # ----------------------------
     def capture(self) -> np.ndarray:
-        frame = self.cctv.shoot()
+        frame = self.cctv.capture()
         if frame is None:
             raise RuntimeError("Failed to read frame from stream.")
         return frame
@@ -194,7 +193,7 @@ class Camera:
                 tracklets = self.tracker.track_image(frame=frame)
 
                 if draw_tracks_on_frame and hasattr(self.tracker, "draw_on_frame"):
-                    frame = self.tracker.draw_on_frame(frame, tracklets)
+                    frame = self.tracker.track_image(frame, tracklets)
 
                 # FPS
                 now = time.time()
