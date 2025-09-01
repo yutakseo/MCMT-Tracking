@@ -8,7 +8,7 @@ from .engine.registry import register_detector
 
 @register_detector("vehicle")
 class VehicleDetector(DetectorBase):
-    DEFAULT_DEVICE = "cuda:0"
+    DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/vehicle/yolov8x_vehicle.py"
     DEFAULT_CKPT   = "/workspace/PretrainedModel_by_JeonYT/vehicle/epoch_54.pth"
     DEFAULT_CLASSES: List[str] = [
@@ -37,6 +37,9 @@ class VehicleDetector(DetectorBase):
 
         # 2) 모델 로드
         self._model = init_detector(config=config, checkpoint=checkpoint, device=device)
+        print(f"[DEBUG] VehicleDetector loaded on device={device}")
+        print("Parameter device:", next(self._model.parameters()).device)
+
 
     # === 필수 프로퍼티 구현 ===
     @property

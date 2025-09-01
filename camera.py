@@ -9,7 +9,7 @@ import numpy as np
 from __Detection.detection_api import DetectionAPI
 from __Tracking.tracking_api import TrackerAPI
 from tools.homo_graphy import PlanProjector
-from tools.stream import StreamCCTV
+from VideoStreamer.stream import StreamCCTV
 
 
 # ----------------------------

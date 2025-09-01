@@ -1,0 +1,3 @@
+/workspace/VideoStreamer/build/CMakeFiles/stream_cctv_cpp.dir
+/workspace/VideoStreamer/build/CMakeFiles/edit_cache.dir
+/workspace/VideoStreamer/build/CMakeFiles/rebuild_cache.dir

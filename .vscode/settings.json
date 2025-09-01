@@ -1,0 +1,8 @@
+{
+    "cmake.sourceDirectory": "/workspace/VideoStreamer",
+    "files.associations": {
+        "*.py": "python",
+        "string": "cpp",
+        "string_view": "cpp"
+    }
+}

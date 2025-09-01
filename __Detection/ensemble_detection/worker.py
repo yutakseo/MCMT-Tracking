@@ -8,7 +8,7 @@ from .engine.registry import register_detector
 
 @register_detector("worker")
 class WorkerDetector(DetectorBase):
-    DEFAULT_DEVICE = "cuda:1"
+    DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/worker/yolov8x_signalman.py"
     DEFAULT_CKPT   = "/workspace/PretrainedModel_by_JeonYT/worker/epoch_100.pth"
     DEFAULT_CLASSES: List[str] = ["signalman", "worker"]
@@ -36,6 +36,8 @@ class WorkerDetector(DetectorBase):
 
         # 2) 모델 로드
         self._model = init_detector(config=config, checkpoint=checkpoint, device=device)
+        print(f"[DEBUG] WorkerDetector loaded on device={device}")
+        print("Parameter device:", next(self._model.parameters()).device)
 
     # === 필수 프로퍼티 ===
     @property
