@@ -1,9 +1,16 @@
-#/workspace/main.py
-from camera import Camera
+# /workspace/main.py
+import os, logging
+from tools.SCST import SCST
+from async_inference import AsyncEngine
 
-# ----------------------------
-# Args
-# ----------------------------
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
+
+# RTSP 옵션(선택)
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|buffer_size;102400|max_delay;0|stimeout;5000000"
+)
+
 class Args:
     track_thresh: float = 0.5
     match_thresh: float = 0.5
@@ -11,27 +18,35 @@ class Args:
     mot20: bool = False
     cpu_workers: int = 10
 
-
-
-# ----------------------------
-# Example
-# ----------------------------
-if __name__ == "__main__":
+def build_cameras():
     args = Args()
+    rtsp = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+    plan_path = "/workspace/assets/25082_homograph_coordinate-plane.jpg"
+    plan_pts  = [
+        (3588, 412), (3588, 1036), (3588, 1657),
+        (2225, 412), (2225, 1036), (2225, 1657),
+        (861, 412),  (861, 1036),  (861, 1657),
+    ]
+    cam1_pts = [(1390,521),(1618,552),(1784,578),(1112,564),(1434,620),(1709,668),(481,651),(852,809),(1393,1007)]
+    cam2_pts = [(1020,1027),(476,898),(294,826),(1348,790),(1017,772),(813,753),(1437,716),(1213,713),(1058,707)]
+    cam3_pts = [(140,309),(291,315),(398,320),(213,376),(440,377),(588,378),(467,596),(826,521),(965,484)]
+    cam1 = SCST(rtsp, cam1_pts, plan_path, plan_pts, args)
+    cam2 = SCST(rtsp, cam2_pts, plan_path, plan_pts, args)
+    cam3 = SCST(rtsp, cam3_pts, plan_path, plan_pts, args)
+    return [cam1, cam2, cam3]
 
-    # (예시) 좌표: 반드시 1:1 대응 & 일관된 순서
-    cam_pts = [(1390, 521), (1618, 552), (1784, 578), (1112, 564)]
-    plan_pts = [(100, 200), (300, 210), (320, 400), (90, 380)]
+def main():
+    cams = build_cameras()
+    engine = AsyncEngine(cams, history_len=10)
 
-    cam = Camera(
-        track_args=args,
-        cctv_url="rtsp://210.99.70.120:1935/live/cctv001.stream",
-        cord_plan="/workspace/assets/25082_homograph_coordinate-plane.jpg",
-        plan_benchmark=plan_pts,
-        cam_pts=cam_pts,
-        results_dir="./results",
-    )
+    engine.run_sync(max_rounds=None)  
+    print("Result :", engine.result)              
+    print("History:", engine.result_history)  
 
-    # 방법 1) 단순 스트리밍 + 종료 시 마지막 좌표만 받기
-    positions = cam.stream_plan(return_positions=True, mode="bottom-center")
-    print("마지막 프레임 객체 좌표:", positions)
+
+    # pkts = engine.run_sync(max_rounds=20)             
+    # print("latest(result):", engine.result)
+    # print("history len:", len(engine.result_history))
+
+if __name__ == "__main__":
+    main()
