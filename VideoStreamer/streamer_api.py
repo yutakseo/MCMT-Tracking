@@ -56,7 +56,7 @@ class CCTVStreamer:
         return self
 
     def stop(self):
-        """스트리밍 정지 및 창 정리(헤드리스 안전)."""
+        """스트리밍 정지 및 창 정리"""
         if self._started:
             try:
                 self.cam.stop()
