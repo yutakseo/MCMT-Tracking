@@ -55,7 +55,7 @@ class SCST:
         self.projector = PlanProjector(plan_img_or_path=self.plan, trail_len=60, trail_ttl=30, line_thickness=4, point_radius=10)
         self.H, self.mask = self.projector.fit_homography(image_pts=self.cctv_pts, plan_pts=self.plan_pts)
         
-        #temp field
+        #temp field 
         self.frame:np.ndarray
         self.detect_result= None
         self.tracklets = None
