@@ -6,7 +6,7 @@ from .engine.detector_base import DetectorBase
 from .engine.registry import register_detector
 
 
-@register_detector("worker")
+#@register_detector("worker")
 class WorkerDetector(DetectorBase):
     DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/worker/yolov8x_signalman.py"

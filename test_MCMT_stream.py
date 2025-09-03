@@ -24,7 +24,9 @@ os.environ.setdefault(
 # 구성
 # ─────────────────────────────────────────────────────────────────────────────
 PLAN_PATH = "/workspace/assets/25082_homograph_coordinate-plane.jpg"
-RTSP_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+RTSP1_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+RTSP2_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+RTSP3_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
 
 class Args:
     track_thresh: float = 0.5
@@ -45,9 +47,9 @@ def build_cameras():
     cam3_pts = [(140,309),(291,315),(398,320),(213,376),(440,377),(588,378),(467,596),(826,521),(965,484)]
 
     return [
-        SCST(RTSP_URL, cam1_pts, PLAN_PATH, plan_pts, args),
-        SCST(RTSP_URL, cam2_pts, PLAN_PATH, plan_pts, args),
-        SCST(RTSP_URL, cam3_pts, PLAN_PATH, plan_pts, args),
+        SCST(RTSP1_URL, cam1_pts, PLAN_PATH, plan_pts, args),
+        SCST(RTSP2_URL, cam2_pts, PLAN_PATH, plan_pts, args),
+        SCST(RTSP3_URL, cam3_pts, PLAN_PATH, plan_pts, args),
     ]
 
 def build_rtsp_streams():
