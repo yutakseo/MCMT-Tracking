@@ -4,13 +4,13 @@ import logging
 import asyncio
 import threading
 
-from tools.SCST import SCST
-from tools.async_inference import AsyncEngine
+from MCMT_engine.SCST import SCST
+from MCMT_engine.async_inference import AsyncEngine
 from tools.webviz import WebPlanViz
 from app_web import serve_webviz
 
 # ← RTSP MJPEG용 (CCTVStreamer 우선, 없으면 OpenCV 폴백)
-from tools.cam_stream import CamMJPEG
+from MCMT_engine.cam_stream import CamMJPEG
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
 

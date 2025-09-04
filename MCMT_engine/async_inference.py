@@ -11,10 +11,10 @@ from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple,
 
 import cv2
 import numpy as np
-from tools.SCST import SCST
+from MCMT_engine.SCST import SCST
 
 # 매칭기 (사용자 모듈)
-from tools.mapping import OnlineMultiCamMatcher, MatchConfig
+from MCMT_engine.mapping import OnlineMultiCamMatcher, MatchConfig
 
 # ── 고정 상수 ─────────────────────────────────────────────────────────────
 WARMUP_FRAMES = 12

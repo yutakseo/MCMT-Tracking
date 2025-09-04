@@ -1,9 +1,9 @@
 # /workspace/main.py
 import logging, os, asyncio
 import numpy as np
-from tools.SCST import SCST
-from tools.async_inference import AsyncEngine  # AsyncEngine 모듈 경로에 맞게 조정
-from tools.visualizer import PlanVisualizer
+from MCMT_engine.SCST import SCST
+from MCMT_engine.async_inference import AsyncEngine  # AsyncEngine 모듈 경로에 맞게 조정
+from MCMT_engine.visualizer import PlanVisualizer
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
 os.environ.setdefault(
