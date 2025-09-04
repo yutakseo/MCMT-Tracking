@@ -23,7 +23,7 @@ class TrackerVisualizer:
         copy: bool = True,
     ) -> np.ndarray:
         """
-        boxes/ID/점수/궤적 그리기
+        boxes/ID/클래스/점수/궤적 그리기
         """
         vis = frame.copy() if copy else frame
         current_ids = set()
@@ -32,14 +32,27 @@ class TrackerVisualizer:
             x, y, bw, bh = map(int, t["bbox"])
             tid = int(t["id"])
             score = float(t.get("score", 0.0))
+            cls_id = t.get("class_id", None)
+            cls_name = t.get("label", None)
             current_ids.add(tid)
 
             color = self._color_from_id(tid)
             cv2.rectangle(vis, (x, y), (x + bw, y + bh), color, 2)
-            label = f"ID:{tid}" + (f" {score:.2f}" if draw_score else "")
+
+            # 라벨 문자열 구성
+            label = f"ID:{tid}"
+            if cls_name:
+                label += f" {cls_name}"
+            elif cls_id is not None:
+                label += f" cls:{cls_id}"
+            if draw_score:
+                label += f" {score:.2f}"
+
+            # 텍스트 출력
             cv2.putText(vis, label, (x, max(0, y - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+            # 궤적 기록
             if trail_len > 0:
                 if tid not in self._trails:
                     self._trails[tid] = deque(maxlen=trail_len)

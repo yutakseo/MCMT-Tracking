@@ -6,7 +6,7 @@ from .engine.detector_base import DetectorBase
 from .engine.registry import register_detector
 
 
-#@register_detector("vehicle")
+@register_detector("vehicle")
 class VehicleDetector(DetectorBase):
     DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/vehicle/yolov8x_vehicle.py"

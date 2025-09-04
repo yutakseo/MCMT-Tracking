@@ -7,26 +7,32 @@ import torch
 # 엔진의 EnsembleDetector
 from __Detection.ensemble_detection.engine.base import EnsembleDetector
 
+
 class DetectionAPI:
     def __init__(
         self,
         thres: float = 0.0,
         device: str = "cuda",
-        names: Optional[List[str]] = None,                # ["vehicle","worker"]
+        model: Optional[List[str]] = None,                # ["vehicle","worker"]
         exclude: Optional[List[str]] = None,              # ["deprecated_model"]
         device_map: Optional[Dict[str, str]] = None,      # {"vehicle":"cuda:0","worker":"cuda:1"}
+        class_names: Optional[List[str]] = None,  # ["Person","Bicycle",...], None이면 coco2name 사용
         use_async: bool = True,
         max_workers: Optional[int] = None,
     ):
         self.detector = EnsembleDetector(
             thres=thres,
-            names=names,
+            names=model,
             exclude=exclude,
             device_map=device_map,
             use_async=use_async,
             max_workers=max_workers,
         )
         self.device = device  # 반환 텐서가 올라갈 디바이스 ("cuda" / "cpu")
+        self._custom_class_map: Dict[int, str] = {}
+        
+        if class_names is not None:
+            self._custom_class_map = {i: name for i, name in enumerate(class_names)}
 
     # 리소스 정리용 (선택)
     def close(self):
@@ -91,8 +97,13 @@ class DetectionAPI:
     # label 조회용 헬퍼 (시각화에 유용)
     def name_map(self) -> Dict[int, str]:
         """
-        모든 등록 디텍터의 coco2name을 합쳐 class_id -> name 맵을 생성
+        class_id → name 맵 반환
+        1) 사용자가 지정한 class_names가 있으면 우선 적용
+        2) 아니면 EnsembleDetector 내부 coco2name을 합침
         """
+        if self._custom_class_map:
+            return self._custom_class_map
+
         m: Dict[int, str] = {}
         for det in getattr(self.detector, "detectors", []):
             m.update(getattr(det, "coco2name", {}))

@@ -6,13 +6,13 @@ from .engine.detector_base import DetectorBase
 from .engine.registry import register_detector
 
 
-#@register_detector("worker")
+@register_detector("worker")
 class WorkerDetector(DetectorBase):
     DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG = "/workspace/PretrainedModel_by_JeonYT/worker/yolov8x_signalman.py"
     DEFAULT_CKPT   = "/workspace/PretrainedModel_by_JeonYT/worker/epoch_100.pth"
     DEFAULT_CLASSES: List[str] = ["signalman", "worker"]
-    DEFAULT_ID2COCO: Dict[int, int] = {0: 2, 1: 3}
+    DEFAULT_ID2COCO: Dict[int, int] = {0: 0, 1: 0}
 
     def __init__(
         self,
@@ -54,5 +54,23 @@ class WorkerDetector(DetectorBase):
 
     # === 필수 메서드 ===
     def detect(self, image: Any) -> Any:
-        # mmdet 3.x: result.pred_instances.{labels,scores,bboxes}
-        return inference_detector(self._model, image)
+        result = inference_detector(self._model, image)
+
+        # mmdet v3.x 기준: result.pred_instances.bboxes/scores/labels
+        if hasattr(result, "pred_instances"):
+            bboxes = result.pred_instances.bboxes.cpu().numpy()
+            scores = result.pred_instances.scores.cpu().numpy()
+            labels = result.pred_instances.labels.cpu().numpy()
+
+            # 🔑 id2coco 기준으로 필터링
+            keep_mask = [lbl in self._id2coco for lbl in labels]
+            bboxes = bboxes[keep_mask]
+            scores = scores[keep_mask]
+            labels = labels[keep_mask]
+
+            result.pred_instances.bboxes = bboxes
+            result.pred_instances.scores = scores
+            result.pred_instances.labels = labels
+
+        return result
+
