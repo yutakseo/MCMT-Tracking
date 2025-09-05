@@ -1,8 +1,8 @@
-#/workspace/MCMT_engine/stream_SCST.py
+# /workspace/MCMT_engine/stream_SCST.py
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional, Any, Callable
+from typing import List, Tuple, Optional, Any, Callable, Dict
 import time
 import cv2
 import numpy as np
@@ -26,6 +26,7 @@ class Args:
     chunk_sec = 10.0
     batch_size = 20
 
+
 # ----------------------------
 # Camera pipeline
 # ----------------------------
@@ -37,6 +38,14 @@ class streamSCST:
         plan_path: str,
         plan_benchmark: List[Tuple[float, float]],
         tracker_args: Any,
+        det_models: Optional[List[str]] = None,
+        det_threshold: float = 0.0,
+        det_device: str = "cuda",
+        det_class_names: Optional[List[str]] = None,
+        det_exclude: Optional[List[str]] = None,
+        det_device_map: Optional[Dict[str, str]] = None,
+        det_use_async: bool = True,
+        det_max_workers: Optional[int] = None,
     ):
         # args
         if tracker_args is None:
@@ -50,7 +59,16 @@ class streamSCST:
         self.plan_pts = plan_benchmark
 
         # dependencies
-        self.detector = DetectionAPI()
+        self.detector = DetectionAPI(
+            models=det_models,
+            thres=det_threshold,
+            device=det_device,
+            class_names=det_class_names,
+            exclude=det_exclude,
+            device_map=det_device_map,
+            use_async=det_use_async,
+            max_workers=det_max_workers,
+        )
         self.tracker = TrackerAPI(args=self.traker_args, detector=self.detector)
 
         # streamer & warm-up
@@ -63,7 +81,7 @@ class streamSCST:
             trail_len=60,
             trail_ttl=30,
             line_thickness=4,
-            point_radius=10, 
+            point_radius=10,
         )
         self.H, self.mask = self.projector.fit_homography(
             image_pts=self.cctv_pts, plan_pts=self.plan_pts
@@ -92,7 +110,6 @@ class streamSCST:
         Capture one frame from streamer and store as self.frame.
         """
         frame = self.camera.capture(copy=False)
-        # CCTVStreamer가 이미 ndarray를 반환한다면 그대로, 아니라면 np.array로 캐스팅
         if not isinstance(frame, np.ndarray):
             frame = np.array(frame) if frame is not None else None
         self.frame = self._ensure_frame(frame)
@@ -131,8 +148,8 @@ class streamSCST:
         동기 파이프라인: capture -> detect -> track -> project
         """
         frame = self._videoCapture()
-        _ = self._detection(frame)            # detector를 쓰는 경우 유지
-        tracklets = self._tracking(frame)     # !!! 핵심 수정: 프레임을 넘긴다
+        _ = self._detection(frame)
+        tracklets = self._tracking(frame)
         projectail, results = self._projection(tracklets)
         return projectail, results
 
@@ -148,8 +165,8 @@ class streamSCST:
             else:
                 frame = self._videoCapture()
 
-        _ = self._detection(frame)            # detector 사용 유지
-        tracklets = self._tracking(frame)     # !!! 핵심 수정: 프레임을 넘긴다
+        _ = self._detection(frame)
+        tracklets = self._tracking(frame)
         projectail, results = self._projection(tracklets)
         return projectail, results
 
@@ -162,6 +179,7 @@ class streamSCST:
         _ = self._detection(frame)
         tracklets = self._tracking(frame)
         return self._projection(tracklets)
+
 
 # Backward compatibility: allow `from MCMT_engine.stream_SCST import SCST`
 SCST = streamSCST

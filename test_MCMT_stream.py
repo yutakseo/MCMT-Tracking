@@ -4,7 +4,7 @@ import logging
 import asyncio
 import threading
 
-from MCMT_engine.stream_SCST import streamSCST
+from MCMT_engine.stream_SCST import streamSCST  # SCST -> streamSCST로 변경
 from MCMT_engine.async_inference import AsyncEngine
 from tools.webviz import WebPlanViz
 from app_web import serve_webviz
@@ -24,19 +24,22 @@ os.environ.setdefault(
 # 구성
 # ─────────────────────────────────────────────────────────────────────────────
 PLAN_PATH = "/workspace/assets/250904_homograph_coordinate-plane2.jpg"
-RTSP1_URL  = "rtsp://admin:asdf2510$_@192.168.50.131:554/video1"
-RTSP2_URL  = "rtsp://admin:asdf2510$_@192.168.50.131:554/video2"
-RTSP3_URL  = "rtsp://admin:asdf2510$_@192.168.50.131:554/video3"
+RTSP1_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+RTSP2_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
+RTSP3_URL  = "rtsp://210.99.70.120:1935/live/cctv001.stream"
 
 class Args:
-    track_thresh: float = 0.5
-    match_thresh: float = 0.5
-    track_buffer: int = 60
-    mot20: bool = False
-    cpu_workers: int = 10
+    track_thresh = 0.3
+    match_thresh = 0.9
+    track_buffer = 180
+    mot20 = False
+    cpu_workers = 20   # 듀얼 CPU 적극 활용
+    chunk_sec   = 10.0 # 15~30초 권장
+    batch_size = 20
 
 def build_cameras():
     args = Args()
+    det_models = ["vehicle"]
     plan_pts  = [
                 (1170,  214),    #point1
                 (1170,  559),   #point2
@@ -80,20 +83,20 @@ def build_cameras():
                 (911,459)]
 
     return [
-        streamSCST(RTSP1_URL, cam1_pts, PLAN_PATH, plan_pts, args),
-        streamSCST(RTSP2_URL, cam2_pts, PLAN_PATH, plan_pts, args),
-        streamSCST(RTSP3_URL, cam3_pts, PLAN_PATH, plan_pts, args),
+        streamSCST(RTSP1_URL, cam1_pts, PLAN_PATH, plan_pts, args, det_models=det_models),  # SCST -> streamSCST
+        streamSCST(RTSP2_URL, cam2_pts, PLAN_PATH, plan_pts, args, det_models=det_models),  # SCST -> streamSCST
+        streamSCST(RTSP3_URL, cam3_pts, PLAN_PATH, plan_pts, args, det_models=det_models),  # SCST -> streamSCST
     ]
 
 def build_rtsp_streams():
     """
-    웹에서 볼 ‘원본 RTSP’ 스트림들 (CCTVStreamer → MJPEG 변환).
+    웹에서 볼 '원본 RTSP' 스트림들 (CCTVStreamer → MJPEG 변환).
     CCTVStreamer(pybind11)가 있으면 자동 사용, 없으면 OpenCV VideoCapture 폴백.
     """
     streams = {
-        "cam1": CamMJPEG(name="cam1", url=RTSP1_URL, width=1080).start(),
-        "cam2": CamMJPEG(name="cam2", url=RTSP2_URL, width=1080).start(),
-        "cam3": CamMJPEG(name="cam3", url=RTSP3_URL, width=1080).start()
+        "cam1": CamMJPEG(name="cam1", url=RTSP1_URL, width=480).start(),
+        "cam2": CamMJPEG(name="cam2", url=RTSP2_URL, width=480).start(),
+        "cam3": CamMJPEG(name="cam3", url=RTSP3_URL, width=480).start()
         # 서로 다른 RTSP라면 각각 다른 URL로 지정하면 됩니다.
     }
     return streams
@@ -103,7 +106,7 @@ def build_rtsp_streams():
 # ─────────────────────────────────────────────────────────────────────────────
 async def main():
     cams = build_cameras()
-    engine = AsyncEngine(cams, history_len=20)
+    engine = AsyncEngine(cams, interval=0.1)  # history_len 제거, interval 추가
 
     # 웹 비주얼라이저 (도면 위 fused 좌표 시각화)
     viz = WebPlanViz(
@@ -120,10 +123,27 @@ async def main():
     t.start()
 
     # 스트리밍 루프: 라운드마다 패킷을 받고 웹 프레임 갱신
-    async for pkt in engine.stream():
-        fused = pkt.get("fused", [])
+    async for result in engine.stream():  # pkt -> result로 변경
+        # 새로운 결과 구조에 맞게 수정
+        timestamp = result['timestamp']
+        round_num = result['round']
+        cameras = result['cameras']
+        
+        # 모든 카메라의 도면 좌표 수집
+        all_coords = []
+        for cam_data in cameras:
+            all_coords.extend(cam_data['plan_coords'])
+        
+        # 웹 비주얼라이저 업데이트 (기존 pkt 구조로 변환)
+        pkt = {
+            'round': round_num,
+            'timestamp': timestamp,
+            'fused': all_coords,  # 모든 카메라의 좌표를 fused로 사용
+            'cameras': cameras
+        }
+        
         viz.update(pkt)  # 도면 프레임 갱신
-        logging.info(f"[APP] round={pkt['round']} fused_n={len(fused)} preview={fused[:3]}")
+        logging.info(f"[APP] round={round_num} total_objects={len(all_coords)} preview={all_coords[:3]}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main()) 

@@ -91,12 +91,13 @@ class AsyncEngine:
         """모든 카메라에서 추론 처리"""
         tasks = []
         for i, (camera, frame) in enumerate(zip(self.cameras, frames)):
-            if frame is not None:
-                task = self._process_single_camera(camera, frame, timestamp, i+1)
-                tasks.append(task)
+            if frame is not None and isinstance(frame, np.ndarray) and frame.size > 0:
+                tasks.append(self._process_single_camera(camera, frame, timestamp, i+1))
             else:
-                # 프레임이 없는 경우 빈 결과
-                tasks.append(asyncio.create_task(self._empty_result(i+1)))
+                # 동기 빈 결과를 스레드풀에서 즉시 생성
+                tasks.append(asyncio.get_event_loop().run_in_executor(
+                    None, (lambda cid=i+1: self._empty_result(cid))
+                ))
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
@@ -112,7 +113,7 @@ class AsyncEngine:
         return valid_results
     
     async def _process_single_camera(
-        self,
+        self, 
         camera: streamSCST, 
         frame: np.ndarray, 
         timestamp: float, 
@@ -130,18 +131,18 @@ class AsyncEngine:
                 None, camera._tracking, frame
             )
             
-            # 3. 호모그래피 변환
+            # 3. 호모그래피 변환 (timestamp 인자 제거)
             projected, _ = await asyncio.get_event_loop().run_in_executor(
-                None, camera._projection, tracklets, timestamp
+                None, camera._projection, tracklets
             )
             
             # 4. 도면 좌표 추출
-            plan_coords = [item["pt"] for item in projected]
+            plan_coords = [item.get("pt") for item in projected if isinstance(item, dict) and "pt" in item]
             
             return {
                 'camera_id': camera_id,
-                'detection_count': len(detection_results),
-                'tracking_count': len(tracklets),
+                'detection_count': len(detection_results) if hasattr(detection_results, "__len__") else 0,
+                'tracking_count': len(tracklets) if hasattr(tracklets, "__len__") else 0,
                 'plan_coords': plan_coords,
                 'tracklets': tracklets,
                 'projected': projected
@@ -151,8 +152,8 @@ class AsyncEngine:
             logging.error(f"Camera {camera_id} processing error: {e}")
             return self._empty_result(camera_id)
     
-    async def _empty_result(self, camera_id: int) -> Dict[str, Any]:
-        """빈 결과 반환"""
+    def _empty_result(self, camera_id: int) -> Dict[str, Any]:
+        """빈 결과 반환 (동기)"""
         return {
             'camera_id': camera_id,
             'detection_count': 0,
@@ -176,8 +177,12 @@ class AsyncEngine:
             coords = cam_result['plan_coords']
             
             print(f"Camera {cam_id}: {det_count} detections, {track_count} tracks")
-            for i, (x, y) in enumerate(coords):
-                print(f"  Object {i+1}: ({x:.1f}, {y:.1f})")
+            for i, pt in enumerate(coords):
+                try:
+                    x, y = pt
+                    print(f"  Object {i+1}: ({x:.1f}, {y:.1f})")
+                except Exception:
+                    pass
     
     def stop(self):
         """스트리밍 중지"""
