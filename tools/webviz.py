@@ -1,4 +1,3 @@
-# /workspace/tools/webviz.py
 from __future__ import annotations
 
 import io
@@ -14,7 +13,8 @@ class WebPlanViz:
     """
     - plan_path 또는 plan_img 중 하나 제공.
     - update(pkt)로 최신 프레임 생성 (pkt는 {"fused": [(x,y), ...], "coords": [[(x,y),...], ...]} 포맷 가정)
-    - mjpeg_generator()를 FastAPI StreamingResponse에 넘겨 웹으로 MJPEG 스트림 제공.
+    - peek_jpeg()로 락 안전하게 최신 JPEG 바이트를 조회.
+    - (옵션) mjpeg_generator()를 FastAPI StreamingResponse에 넘겨 MJPEG 제공.
     """
 
     def __init__(
@@ -82,11 +82,10 @@ class WebPlanViz:
         fused = pkt.get("fused") or []
         coords_per_cam = pkt.get("coords") or []
 
-        # FPS 제한
         now = time.time()
-        if now - self._last_render_t < self._min_interval:
-            # 그래도 최신 프레임으로 한 번 갱신은 해주자 (너무 과하면 drop)
-            pass
+        # FPS 제한: 너무 빠르면 이번 프레임은 드롭
+        if self._min_interval > 0 and (now - self._last_render_t) < self._min_interval:
+            return
         self._last_render_t = now
 
         frame = self._draw(fused, coords_per_cam, round_idx=pkt.get("round"))
@@ -94,10 +93,16 @@ class WebPlanViz:
         with self._lock:
             self._last_jpeg = jpg
 
+    def peek_jpeg(self) -> bytes:
+        """
+        최신 JPEG 바이트를 락으로 감싸 안전하게 반환.
+        """
+        with self._lock:
+            return self._last_jpeg
+
     def mjpeg_generator(self):
         """
-        FastAPI StreamingResponse에 바인딩할 제너레이터.
-        최신 JPEG을 boundary 포맷으로 계속 내보냄.
+        (선택) FastAPI StreamingResponse에 바인딩할 동기 제너레이터.
         """
         boundary = b"--frame"
         while True:

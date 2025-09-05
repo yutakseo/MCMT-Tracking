@@ -43,11 +43,9 @@ class CamMJPEG:
         self._jpg: Optional[bytes] = self._make_placeholder(f"Waiting: {self.name}")
         self._stop = False
         self._th: Optional[threading.Thread] = None
-        self._connection_attempts = 0
-        self._max_connection_attempts = 5
 
-        # 백엔드 선택 - OpenCV 우선 사용 (RTSP 안정성)
-        self._backend = "opencv"  # OpenCV 백엔드를 기본으로 사용
+        # 백엔드 선택
+        self._backend = "cctv" if (_HAS_CCTV and (streamer is not None or url is not None)) else "opencv"
         self._cap = None
         self._cctv: Optional[CCTVStreamer] = None
 
@@ -66,20 +64,8 @@ class CamMJPEG:
                 self._cctv = CCTVStreamer(self.url, max_width=int(mw), window_name=self.name)  # type: ignore
             self._cctv.start()  # type: ignore
         else:
-            # OpenCV 백엔드 - RTSP 연결 개선
-            print(f"🔗 OpenCV로 RTSP 연결 시도: {self.url}")
-            self._cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-            
-            # RTSP 연결 옵션 설정
-            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
-            self._cap.set(cv2.CAP_PROP_FPS, 30)  # FPS 설정
-            
-            # 연결 테스트
-            if not self._cap.isOpened():
-                print(f"❌ RTSP 연결 실패: {self.url}")
-                self._cap = None
-            else:
-                print(f"✅ RTSP 연결 성공: {self.url}")
+            # OpenCV 백엔드
+            self._cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)  # type: ignore
 
         self._th = threading.Thread(target=self._reader_loop, daemon=True)
         self._th.start()
@@ -114,9 +100,6 @@ class CamMJPEG:
     # ── 내부 루프 ─────────────────────────────────────────────────────────
     def _reader_loop(self):
         backoff = 0.5
-        consecutive_failures = 0
-        max_consecutive_failures = 10
-        
         while not self._stop:
             try:
                 while not self._stop:
@@ -126,41 +109,14 @@ class CamMJPEG:
                         frame = self._cctv.capture(copy=True) if self._cctv else None  # type: ignore
                     else:
                         if self._cap is None or not self._cap.isOpened():
-                            # 재연결 시도
-                            if self._connection_attempts < self._max_connection_attempts:
-                                print(f"🔄 RTSP 재연결 시도 {self._connection_attempts + 1}/{self._max_connection_attempts}")
-                                self._cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-                                self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                                self._cap.set(cv2.CAP_PROP_FPS, 30)
-                                self._connection_attempts += 1
-                                
-                                if not self._cap.isOpened():
-                                    time.sleep(2)
-                                    continue
-                                else:
-                                    print(f"✅ RTSP 재연결 성공")
-                                    consecutive_failures = 0
-                            else:
-                                raise RuntimeError(f"RTSP 연결 실패 (최대 시도 횟수 초과): {self.url}")
-                        
+                            raise RuntimeError("VideoCapture not opened")
                         ok, f = self._cap.read()
                         frame = f if ok else None
 
                     if frame is None:
-                        consecutive_failures += 1
-                        if consecutive_failures > max_consecutive_failures:
-                            print(f"❌ 연속 프레임 읽기 실패 {consecutive_failures}회 - 재연결 시도")
-                            if self._backend == "opencv" and self._cap:
-                                self._cap.release()
-                                self._cap = None
-                            consecutive_failures = 0
-                            time.sleep(1)
-                        else:
-                            time.sleep(0.02)
+                        # 입력 끊김: 재시도 / CCTVStreamer는 내부 재연결 로직이 있어 살짝 대기
+                        time.sleep(0.02)
                         continue
-
-                    # 성공적으로 프레임을 읽었으면 실패 카운터 리셋
-                    consecutive_failures = 0
 
                     # 리사이즈
                     if self.width or self.height:
@@ -173,11 +129,6 @@ class CamMJPEG:
                         ts = time.strftime("%Y-%m-%d %H:%M:%S")
                         cv2.putText(frame, f"{self.name}  {ts}", (10, 24),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-                        
-                        # 연결 상태 표시
-                        status_color = (0, 255, 0) if consecutive_failures == 0 else (0, 0, 255)
-                        cv2.putText(frame, f"LIVE", (10, 50),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
 
                     ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
                     if ok:
@@ -185,20 +136,11 @@ class CamMJPEG:
                             self._jpg = jpg.tobytes()
 
                 break  # stop
-            except Exception as e:
-                print(f"❌ CamMJPEG {self.name} 오류: {e}")
+            except Exception:
                 with self._lock:
-                    self._jpg = self._make_placeholder(f"Error: {self.name}")
+                    self._jpg = self._make_placeholder(f"Reconnecting: {self.name}")
                 time.sleep(backoff)
                 backoff = min(5.0, backoff * 2.0)
-                
-                # OpenCV 백엔드에서 연결 재시도
-                if self._backend == "opencv" and self._cap:
-                    try:
-                        self._cap.release()
-                    except:
-                        pass
-                    self._cap = None
 
     @staticmethod
     def _make_placeholder(text: str) -> bytes:
