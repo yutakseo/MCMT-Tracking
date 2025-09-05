@@ -7,7 +7,15 @@ from typing import List, Dict, Any, Optional
 
 class TrackerVisualizer:
     def __init__(self):
-        self._trails = {}
+        self._trails = {}           # tid -> deque
+        self._last_seen = {}        # tid -> last seen frame index (선택)
+        self._frame_idx = 0
+
+    def reset(self):
+        """저장된 궤적/상태 초기화 (새 영상 시작 시 호출)"""
+        self._trails.clear()
+        self._last_seen.clear()
+        self._frame_idx = 0
 
     def _color_from_id(self, track_id: int):
         h = md5(str(track_id).encode()).hexdigest()
@@ -21,10 +29,12 @@ class TrackerVisualizer:
         trail_thickness: int = 2,
         draw_score: bool = True,
         copy: bool = True,
+        trail_ttl: Optional[int] = None,  # 프레임 기준 TTL (예: 300). None이면 현재 프레임에서 사라진 ID는 즉시 제거
     ) -> np.ndarray:
         """
         boxes/ID/클래스/점수/궤적 그리기
         """
+        self._frame_idx += 1
         vis = frame.copy() if copy else frame
         current_ids = set()
 
@@ -35,6 +45,7 @@ class TrackerVisualizer:
             cls_id = t.get("class_id", None)
             cls_name = t.get("label", None)
             current_ids.add(tid)
+            self._last_seen[tid] = self._frame_idx
 
             color = self._color_from_id(tid)
             cv2.rectangle(vis, (x, y), (x + bw, y + bh), color, 2)
@@ -72,5 +83,20 @@ class TrackerVisualizer:
                     cx, cy = map(int, pts[-1])
                     cv2.circle(vis, (cx, cy), radius=2 + trail_thickness,
                                color=self._color_from_id(tid), thickness=-1)
+
+        # === 메모리/누수 방지: 현재 프레임에 보이지 않는 ID 정리 ===
+        if trail_ttl is None:
+            # 즉시 제거 모드: 이번 프레임에 등장하지 않은 ID는 trail 제거
+            stale_ids = [tid for tid in list(self._trails.keys()) if tid not in current_ids]
+            for tid in stale_ids:
+                self._trails.pop(tid, None)
+                self._last_seen.pop(tid, None)
+        else:
+            # TTL 모드: 마지막으로 본 지 trail_ttl 프레임이 지나면 제거
+            cutoff = self._frame_idx - int(trail_ttl)
+            stale_ids = [tid for tid, last in list(self._last_seen.items()) if last <= cutoff]
+            for tid in stale_ids:
+                self._trails.pop(tid, None)
+                self._last_seen.pop(tid, None)
 
         return vis

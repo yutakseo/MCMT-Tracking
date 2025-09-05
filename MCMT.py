@@ -1,7 +1,7 @@
 # /workspace/main.py
 import logging, os, asyncio
 import numpy as np
-from MCMT_engine.SCST import SCST
+from MCMT_engine.stream_SCST import SCST
 from MCMT_engine.async_inference import AsyncEngine  # AsyncEngine 모듈 경로에 맞게 조정
 from MCMT_engine.visualizer import PlanVisualizer
 

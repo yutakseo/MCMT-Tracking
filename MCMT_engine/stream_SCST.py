@@ -1,3 +1,4 @@
+#/workspace/MCMT_engine/stream_SCST.py
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,17 +18,18 @@ from tools.homo_graphy import PlanProjector
 # ----------------------------
 @dataclass
 class Args:
-    track_thresh: float = 0.5
-    match_thresh: float = 0.5
-    track_buffer: int = 60
-    mot20: bool = False
-    cpu_workers: int = 10
-
+    track_thresh = 0.1
+    match_thresh = 0.9
+    track_buffer = 120
+    mot20 = False
+    cpu_workers = 20
+    chunk_sec = 10.0
+    batch_size = 20
 
 # ----------------------------
 # Camera pipeline
 # ----------------------------
-class SCST:
+class streamSCST:
     def __init__(
         self,
         cctv_url: str,
@@ -61,7 +63,7 @@ class SCST:
             trail_len=60,
             trail_ttl=30,
             line_thickness=4,
-            point_radius=10,
+            point_radius=10, 
         )
         self.H, self.mask = self.projector.fit_homography(
             image_pts=self.cctv_pts, plan_pts=self.plan_pts
@@ -160,3 +162,6 @@ class SCST:
         _ = self._detection(frame)
         tracklets = self._tracking(frame)
         return self._projection(tracklets)
+
+# Backward compatibility: allow `from MCMT_engine.stream_SCST import SCST`
+SCST = streamSCST
