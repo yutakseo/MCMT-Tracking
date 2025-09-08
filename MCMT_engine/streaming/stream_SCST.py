@@ -116,20 +116,27 @@ class streamSCST:
     def _tracking(self, frame: np.ndarray) -> Any:
         """추적 (공유 트래커 사용)"""
         if self.tracker is None:
+            print(f"[DEBUG] streamSCST._tracking: tracker is None, 빈 리스트 반환")
             return []
         
         try:
+            print(f"[DEBUG] streamSCST._tracking: tracker.track_image 호출 시작...")
             result = self.tracker.track_image(frame)
+            print(f"[DEBUG] streamSCST._tracking: tracker.track_image 완료, {len(result)} tracklets")
+            print(f"[DEBUG] streamSCST._tracking: result 타입: {type(result)}")
+            if result:
+                print(f"[DEBUG] streamSCST._tracking: 첫 번째 tracklet 예시: {result[0] if len(result) > 0 else 'None'}")
             return result
         except Exception as e:
             logging.error(f"Tracking failed: {e}")
+            print(f"[DEBUG] streamSCST._tracking: 예외 발생: {e}")
             return []
 
     def _projection(self, tracklets: Any) -> Tuple[List[Dict], Any]:
         """호모그래피 변환"""
         try:
             timestamp = time.time()
-            projected, trails = self.projector.projection(tracklets, timestamp)
+            projected, trails = self.projector.projection(tracklets, mode="center", timestamp=timestamp)
             return projected, trails
         except Exception as e:
             logging.error(f"Projection failed: {e}")

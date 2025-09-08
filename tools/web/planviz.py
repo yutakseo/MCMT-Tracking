@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 
-class WebPlanViz:
+class PlanViz:
     """
     - plan_path 또는 plan_img 중 하나 제공.
     - update(pkt)로 최신 프레임 생성 (pkt는 {"fused": [(x,y), ...], "coords": [[(x,y),...], ...]} 포맷 가정)

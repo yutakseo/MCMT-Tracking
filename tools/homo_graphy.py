@@ -175,7 +175,8 @@ class PlanProjector:
         draw: bool = True,
         image_pts: Optional[List[Tuple[float, float]]] = None,
         plan_pts: Optional[List[Tuple[float, float]]] = None,
-        ransac_thresh: float = 3.0
+        ransac_thresh: float = 3.0,
+        timestamp: Optional[float] = None
     ) -> Tuple[List[DetItem], Optional[np.ndarray]]:
         """
         한 프레임의 탐지/트랙 결과를 도면 좌표계로 투영.

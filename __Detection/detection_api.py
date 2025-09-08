@@ -7,6 +7,16 @@ import torch
 # 엔진의 EnsembleDetector
 from __Detection.ensemble_detection.engine.base import EnsembleDetector
 
+DEFAULT_CLASS_MAP: Dict[int, str] = {
+    0:  "worker",
+    10: "excavator",
+    11: "dump_truck",
+    12: "forklift",
+    13: "mixer_truck",
+    14: "scissor_lift",
+    15: "dozer",
+    16: "cargo_truck",
+}
 
 class DetectionAPI:
     """
@@ -16,7 +26,6 @@ class DetectionAPI:
     - detect_raw()   : detector별 원시 dict 반환
     - name_map()     : class_id → label 맵
     """
-
     def __init__(
         self,
         thres: float = 0.0,
@@ -24,7 +33,7 @@ class DetectionAPI:
         models: Optional[List[str]] = None,        # ["vehicle","worker"]
         exclude: Optional[List[str]] = None,       # ["deprecated_model"]
         device_map: Optional[Dict[str, str]] = None,  # {"vehicle":"cuda:0","worker":"cuda:1"}
-        class_names: Optional[List[str]] = None,   # ["Person","Bicycle",...], None이면 coco2name 사용
+        class_names: Optional[List[str]] = DEFAULT_CLASS_MAP,   # ["Person","Bicycle",...], None이면 coco2name 사용
         use_async: bool = True,
         max_workers: Optional[int] = None,
     ):

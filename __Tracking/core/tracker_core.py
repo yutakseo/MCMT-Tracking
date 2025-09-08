@@ -38,25 +38,39 @@ class TrackerCore:
     # ----------------------------
     def track_frame(self, frame) -> List[Dict[str, Any]]:
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            print(f"[DEBUG] TrackerCore.track_frame: 유효하지 않은 프레임, 빈 리스트 반환")
             return []
 
         fh, fw = frame.shape[:2]
+        print(f"[DEBUG] TrackerCore.track_frame: frame shape=({fh}, {fw})")
+        
         if self.img_size is None:
             # 첫 프레임 기준으로 img_size 고정
             self.img_size = (fh, fw)
+            print(f"[DEBUG] TrackerCore.track_frame: img_size 초기화: {self.img_size}")
         elif self.img_size != (fh, fw):
             # 예상치 못한 해상도 변경: 트래커를 재초기화해서 스케일 꼬임 방지
+            print(f"[DEBUG] TrackerCore.track_frame: 해상도 변경 감지, 트래커 재초기화")
             self.reset_tracker()
             self.img_size = (fh, fw)
 
         # 1) DetectionAPI → torch.Tensor (N,6)
+        print(f"[DEBUG] TrackerCore.track_frame: detector.detect 호출...")
         dets = self.detector.detect(frame)
+        print(f"[DEBUG] TrackerCore.track_frame: detector.detect 완료, {len(dets) if hasattr(dets, '__len__') else 'N/A'} detections")
 
         # 2) ByteTrack 업데이트
+        print(f"[DEBUG] TrackerCore.track_frame: tracker.update 호출...")
         online_targets = self.tracker.update(dets, (fh, fw), self.img_size)
+        print(f"[DEBUG] TrackerCore.track_frame: tracker.update 완료, {len(online_targets) if hasattr(online_targets, '__len__') else 'N/A'} targets")
 
         # 3) 결과 변환
-        return self._to_results(online_targets)
+        print(f"[DEBUG] TrackerCore.track_frame: _to_results 호출...")
+        results = self._to_results(online_targets)
+        print(f"[DEBUG] TrackerCore.track_frame: _to_results 완료, {len(results)} results")
+        if results:
+            print(f"[DEBUG] TrackerCore.track_frame: 첫 번째 결과 예시: {results[0] if len(results) > 0 else 'None'}")
+        return results
 
     # ----------------------------
     # 신규: 배치 프레임 추적
@@ -142,11 +156,25 @@ class TrackerCore:
         for t in online_targets:
             class_id = t.class_id if getattr(t, "class_id", None) is not None else -1
             label = self.class_map.get(class_id, class_id)
+            
+            # tensor를 numpy로 변환
+            bbox = t.tlwh
+            if hasattr(bbox, 'cpu'):  # torch tensor인 경우
+                bbox = bbox.cpu().numpy()
+            elif not isinstance(bbox, np.ndarray):  # 다른 타입인 경우
+                bbox = np.array(bbox, dtype=np.float32)
+            
+            score = t.score
+            if hasattr(score, 'cpu'):  # torch tensor인 경우
+                score = score.cpu().item()
+            elif not isinstance(score, (int, float)):  # numpy scalar인 경우
+                score = float(score)
+            
             results.append({
-                "id": t.track_id,          # int 유지
-                "class_id": class_id,      # np.int32 등 보존
-                "label": label,            # str 또는 class_id 그대로
-                "bbox": t.tlwh,            # np.ndarray(float32)
-                "score": t.score,          # np.float32
+                "id": int(t.track_id),          # int로 변환
+                "class_id": int(class_id),      # int로 변환
+                "label": str(label),            # str로 변환
+                "bbox": bbox,                   # numpy array
+                "score": float(score),          # float로 변환
             })
         return results

@@ -17,6 +17,9 @@ from typing import List, Dict, Any, Optional, Tuple
 
 sys.path.append("/workspace")
 
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
+
 from mmyolo.utils import register_all_modules
 register_all_modules()
 
@@ -24,7 +27,7 @@ from MCMT_engine.core.async_inference import AsyncEngine
 from MCMT_engine.streaming.stream_SCST import streamSCST
 from MCMT_engine.streaming.cam_stream import CamMJPEG
 from MCMT_engine.visualization.visualizer import PlanVisualizer
-from tools.webviz import WebPlanViz
+from tools.web.planviz import PlanViz
 from __Detection.detection_api import DetectionAPI
 from __Tracking.tracking_api import TrackerAPI
 
@@ -90,9 +93,9 @@ class MultiCameraTrackingSystem:
     def initialize_shared_models(self) -> bool:
         """단일 모델 인스턴스 생성 (모든 카메라가 공유)"""
         try:
-            print("📦 공유 모델 초기화 중...")
+            logging.info("공유 모델 초기화 중...")
             args = TrackingArgs()
-            print(f"🎯 사용할 탐지 모델: {self.detector_models}")
+            logging.info(f"사용할 탐지 모델: {self.detector_models}")
 
             self.shared_detector = DetectionAPI(
                 models=self.detector_models,
@@ -103,24 +106,24 @@ class MultiCameraTrackingSystem:
             )
 
             self.shared_tracker = TrackerAPI(args=args, detector=self.shared_detector)
-            print("✅ 공유 모델 초기화 완료")
+            logging.info("공유 모델 초기화 완료")
             
             # GPU 메모리 사용량 확인
             import torch
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / 1024**3
-                print(f"💾 GPU 메모리 사용량: {allocated:.2f}GB (공유 모델)")
+                logging.info(f"GPU 메모리 사용량: {allocated:.2f}GB (공유 모델)")
             
             return True
         except Exception as e:
-            print(f"❌ 공유 모델 초기화 실패: {e}")
+            logging.error(f"공유 모델 초기화 실패: {e}")
             return False
     
     def initialize_cameras(self) -> bool:
         """카메라 초기화 (단일 모델 공유)"""
         try:
-            print("📷 카메라 초기화 중...")
-            print(f"🎥 카메라 소스: {CAMERA_SOURCES}")
+            logging.info("카메라 초기화 중...")
+            logging.info(f"카메라 소스: {CAMERA_SOURCES}")
             
             args = TrackingArgs()
             self.cameras = []
@@ -137,29 +140,29 @@ class MultiCameraTrackingSystem:
                         tracker=self.shared_tracker     # 공유 트래커 주입
                     )
                     self.cameras.append(cam)
-                    print(f"✅ Camera {i+1} 초기화 완료 (소스: {source})")
+                    logging.info(f"Camera {i+1} 초기화 완료 (소스: {source})")
                 except Exception as e:
-                    print(f"❌ Camera {i+1} 초기화 실패: {e}")
+                    logging.error(f"Camera {i+1} 초기화 실패: {e}")
                     self.cameras.append(None)
 
             # 성공한 카메라만 필터링
             self.cameras = [cam for cam in self.cameras if cam is not None]
-            print(f"🎯 총 {len(self.cameras)}개 카메라가 단일 모델을 공유합니다!")
+            logging.info(f"총 {len(self.cameras)}개 카메라가 단일 모델을 공유합니다!")
             
             return len(self.cameras) > 0
         except Exception as e:
-            print(f"❌ 카메라 초기화 실패: {e}")
+            logging.error(f"카메라 초기화 실패: {e}")
             return False
     
     def initialize_streams(self) -> bool:
         """웹 스트리밍용 카메라 스트림 초기화"""
         try:
-            print("📹 웹 스트림 초기화 중...")
+            logging.info("웹 스트림 초기화 중...")
             self.streams = {}
             
             for i, source in enumerate(CAMERA_SOURCES):
                 try:
-                    print(f"🔗 Stream {i+1} 연결 시도 중... (소스: {source})")
+                    logging.info(f"Stream {i+1} 연결 시도 중... (소스: {source})")
                     
                     stream = CamMJPEG(
                         name=f"cam{i+1}",
@@ -170,14 +173,14 @@ class MultiCameraTrackingSystem:
                     stream = stream.start()
                     
                     # 연결 테스트 (3초 대기)
-                    print(f"⏳ Stream {i+1} 연결 테스트 중...")
+                    logging.info(f"Stream {i+1} 연결 테스트 중...")
                     time.sleep(3)
                     
                     if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
                         self.streams[f"cam{i+1}"] = stream
-                        print(f"✅ Stream {i+1} 초기화 완료 (소스: {source})")
+                        logging.info(f"Stream {i+1} 초기화 완료 (소스: {source})")
                     else:
-                        print(f"⚠️ Stream {i+1} 연결 불안정 - 재시도 중...")
+                        logging.warning(f"Stream {i+1} 연결 불안정 - 재시도 중...")
                         stream.stop()
                         time.sleep(2)
                         stream = CamMJPEG(name=f"cam{i+1}", url=source, width=480, jpeg_quality=85).start()
@@ -185,41 +188,41 @@ class MultiCameraTrackingSystem:
                         
                         if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
                             self.streams[f"cam{i+1}"] = stream
-                            print(f"✅ Stream {i+1} 재연결 성공")
+                            logging.info(f"Stream {i+1} 재연결 성공")
                         else:
-                            print(f"❌ Stream {i+1} 연결 실패 - 건너뜀")
+                            logging.error(f"Stream {i+1} 연결 실패 - 건너뜀")
                             
                 except Exception as e:
-                    print(f"❌ Stream {i+1} 초기화 실패: {e}")
+                    logging.error(f"Stream {i+1} 초기화 실패: {e}")
             
-            print(f"✅ {len(self.streams)}개 카메라 스트림이 초기화되었습니다")
+            logging.info(f"{len(self.streams)}개 카메라 스트림이 초기화되었습니다")
             return True
         except Exception as e:
-            print(f"❌ 스트림 초기화 실패: {e}")
+            logging.error(f"스트림 초기화 실패: {e}")
             return False
     
     def initialize_visualization(self) -> bool:
         """웹 시각화 초기화"""
         try:
-            print("🎨 웹 시각화 초기화 중...")
+            logging.info("웹 시각화 초기화 중...")
             
             # 도면 파일 존재 확인
             if not os.path.exists(PLAN_PATH):
-                print(f"❌ 도면 파일이 없습니다: {PLAN_PATH}")
+                logging.error(f"도면 파일이 없습니다: {PLAN_PATH}")
                 return False
                 
-            self.viz = WebPlanViz(plan_path=PLAN_PATH, show_cam_points=False, fps_limit=12.0)
-            print("✅ WebPlanViz 초기화 완료")
+            self.viz = PlanViz(plan_path=PLAN_PATH, show_cam_points=False, fps_limit=12.0)
+            logging.info("PlanViz 초기화 완료")
             
             return True
         except Exception as e:
-            print(f"❌ 웹 시각화 초기화 실패: {e}")
+            logging.error(f"웹 시각화 초기화 실패: {e}")
             return False
     
     def initialize_engine(self) -> bool:
         """비동기 추론 엔진 초기화"""
         try:
-            print("⚙️ 추론 엔진 초기화 중...")
+            logging.info("추론 엔진 초기화 중...")
             self.engine = AsyncEngine(
                 self.cameras,
                 interval=0.3,
@@ -229,10 +232,10 @@ class MultiCameraTrackingSystem:
                 gpu_recovery=85.0,     # 85% 이하: 정상 복구
                 gpu_id=0
             )
-            print("✅ 추론 엔진 초기화 완료")
+            logging.info("추론 엔진 초기화 완료")
             return True
         except Exception as e:
-            print(f"❌ 추론 엔진 초기화 실패: {e}")
+            logging.error(f"추론 엔진 초기화 실패: {e}")
             return False
     
     def get_system_info(self) -> Dict[str, Any]:
@@ -251,7 +254,7 @@ class MultiCameraTrackingSystem:
     
     def cleanup(self):
         """리소스 정리"""
-        print("🧹 리소스 정리 중...")
+        logging.info("리소스 정리 중...")
         
         # 카메라 정리
         for cam in self.cameras:
@@ -281,7 +284,7 @@ class MultiCameraTrackingSystem:
         except:
             pass
         
-        print("✅ 정리 완료")
+        logging.info("정리 완료")
 
 # =============================================================================
 # 팩토리 함수
@@ -302,10 +305,10 @@ def create_tracking_system(detector_models: List[str] = None) -> MultiCameraTrac
         raise RuntimeError("카메라 초기화 실패")
     
     if not system.initialize_streams():
-        print("⚠️ 스트림 초기화 실패 - 웹 스트리밍 비활성화")
+        logging.warning("스트림 초기화 실패 - 웹 스트리밍 비활성화")
     
     if not system.initialize_visualization():
-        print("⚠️ 웹 시각화 초기화 실패 - 웹 시각화 비활성화")
+        logging.warning("웹 시각화 초기화 실패 - 웹 시각화 비활성화")
     
     if not system.initialize_engine():
         raise RuntimeError("추론 엔진 초기화 실패")
@@ -323,24 +326,24 @@ async def test_system(detector_models: List[str] = None):
     """
     try:
         system = create_tracking_system(detector_models=detector_models)
-        print("🎉 시스템 초기화 완료!")
-        print(f"📊 시스템 정보: {system.get_system_info()}")
+        logging.info("시스템 초기화 완료!")
+        logging.info(f"시스템 정보: {system.get_system_info()}")
         
         # 간단한 테스트 실행
-        print("🧪 추론 엔진 테스트 중...")
+        logging.info("추론 엔진 테스트 중...")
         count = 0
         async for result in system.engine.stream():
             count += 1
-            print(f"Round {count}: {result.get('total_detections', 0)} detections, {result.get('total_tracks', 0)} tracks")
+            logging.info(f"Round {count}: {result.get('total_detections', 0)} detections, {result.get('total_tracks', 0)} tracks")
             
             if count >= 5:  # 5라운드만 테스트
                 break
         
-        print("✅ 시스템 테스트 완료!")
+        logging.info("시스템 테스트 완료!")
         return system
         
     except Exception as e:
-        print(f"❌ 시스템 테스트 실패: {e}")
+        logging.error(f"시스템 테스트 실패: {e}")
         return None
     finally:
         if 'system' in locals():

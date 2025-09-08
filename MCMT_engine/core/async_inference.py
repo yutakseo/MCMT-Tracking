@@ -116,43 +116,60 @@ class AsyncEngine:
         """배치 처리로 모든 카메라 동시 처리"""
         try:
             timestamp = time.time()
+            print(f"[DEBUG] AsyncEngine._process_batch_round: round={round_num}, gpu_util={gpu_util:.1f}%")
             
             # 1. 모든 카메라에서 프레임 캡처
+            print(f"[DEBUG] AsyncEngine: 프레임 캡처 시작...")
             frames = await self._capture_all_cameras()
+            print(f"[DEBUG] AsyncEngine: 프레임 캡처 완료, {len(frames)}개 프레임")
             
             # 2. 유효한 프레임들만 필터링
             valid_frames = [(i, frame) for i, frame in enumerate(frames) 
                           if frame is not None and isinstance(frame, np.ndarray) and frame.size > 0]
+            print(f"[DEBUG] AsyncEngine: 유효한 프레임 {len(valid_frames)}개")
             
             if not valid_frames:
+                print(f"[DEBUG] AsyncEngine: 유효한 프레임이 없음, None 반환")
                 return None
             
             # 3. 배치 탐지 (단일 모델로 모든 프레임 처리)
+            print(f"[DEBUG] AsyncEngine: 배치 탐지 시작...")
             batch_start_time = time.time()
             detection_results = await self._batch_detection([frame for _, frame in valid_frames])
             batch_time = time.time() - batch_start_time
+            print(f"[DEBUG] AsyncEngine: 배치 탐지 완료, {len(detection_results)}개 결과, {batch_time:.3f}s")
             
             # 4. 각 카메라별 추적 및 호모그래피 처리
             camera_results = []
             for i, (cam_idx, frame) in enumerate(valid_frames):
                 det_result = detection_results[i] if i < len(detection_results) else []
                 
+                # detection 결과를 numpy로 변환
+                det_result = self._convert_to_numpy(det_result)
+                
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} - {len(det_result)} detections")
+                
                 # 추적
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} 추적 시작...")
                 tracklets = await asyncio.get_event_loop().run_in_executor(
                     None, self.cameras[cam_idx]._tracking, frame
                 )
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} 추적 완료, {len(tracklets)} tracklets")
                 
                 # 호모그래피 변환
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} 호모그래피 변환 시작...")
                 projected, _ = await asyncio.get_event_loop().run_in_executor(
                     None, self.cameras[cam_idx]._projection, tracklets
                 )
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} 호모그래피 변환 완료, {len(projected)} projected")
                 
                 # 도면 좌표 추출
                 plan_coords = [item.get("pt") for item in projected 
                               if isinstance(item, dict) and "pt" in item]
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} plan_coords: {len(plan_coords)}개")
                 
                 h, w = frame.shape[:2]
-                camera_results.append({
+                camera_result = {
                     'camera_id': cam_idx + 1,
                     'detection_count': len(det_result) if hasattr(det_result, "__len__") else 0,
                     'tracking_count': len(tracklets) if hasattr(tracklets, "__len__") else 0,
@@ -161,7 +178,9 @@ class AsyncEngine:
                     'projected': projected,
                     'frame_shape': (h, w),
                     'detections': det_result,
-                })
+                }
+                camera_results.append(camera_result)
+                print(f"[DEBUG] AsyncEngine: Camera {cam_idx+1} 결과: {camera_result}")
                 
                 # 통계 업데이트
                 self.stats['total_detections'] += len(det_result) if hasattr(det_result, "__len__") else 0
@@ -350,6 +369,28 @@ class AsyncEngine:
         if total > 0:
             logging.info(f"Normal Rate: {normal/total*100:.1f}%, Warning Rate: {warning/total*100:.1f}%")
             logging.info(f"Danger Rate: {danger/total*100:.1f}%, Critical Rate: {critical/total*100:.1f}%")
+
+    def _convert_to_numpy(self, data):
+        """tensor를 numpy로 변환하는 유틸리티 함수"""
+        if data is None:
+            return []
+        
+        # tensor인 경우
+        if hasattr(data, 'cpu'):
+            return data.cpu().numpy()
+        
+        # 이미 numpy array인 경우
+        if isinstance(data, np.ndarray):
+            return data
+        
+        # 리스트나 다른 iterable인 경우
+        if hasattr(data, '__iter__'):
+            try:
+                return np.array(data)
+            except:
+                return data
+        
+        return data
 
     def stop(self):
         """스트리밍 중지"""

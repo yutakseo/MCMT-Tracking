@@ -129,7 +129,12 @@ class TrackerAPI:
         if frame is None or not isinstance(frame, np.ndarray):
             raise TypeError("Input frame must be a valid numpy.ndarray")
 
+        print(f"[DEBUG] TrackerAPI.track_image: frame shape={frame.shape}, visualize={visualize}")
         frame_res = self.core.track_frame(frame)
+        print(f"[DEBUG] TrackerAPI.track_image: core.track_frame 완료, {len(frame_res)} tracklets")
+        if frame_res:
+            print(f"[DEBUG] TrackerAPI.track_image: 첫 번째 tracklet 예시: {frame_res[0] if len(frame_res) > 0 else 'None'}")
+        
         if visualize:
             vis = self.visualizer.draw_frame(frame, frame_res, trail_len=int(min(trail_len, 1000)))
             return frame_res, vis

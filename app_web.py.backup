@@ -13,7 +13,7 @@ import threading
 
 sys.path.append("/workspace")
 
-app = FastAPI(title="Multi-Camera Web Server", version="1.3.0")
+app = FastAPI(title="Multi-Camera Web Server", version="1.4.0")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 전역 핸들 (main.py에서 주입)
@@ -25,6 +25,9 @@ PLAN_IMG = "/workspace/assets/250904_homograph_coordinate-plane2.jpg"
 # 바운딩박스/라벨 오버레이 저장소
 _cam_overlays: Dict[str, List[Dict[str, Any]]] = {}  # {"Camera 1":[{...}], ...}
 _cam_ov_lock = threading.Lock()
+
+# 클래스 맵(DetectionAPI에서 1회 주입)
+_class_map: Dict[int, str] = {}
 
 # 기본 카메라 이미지 스케일 (원본의 n%)
 CAM_IMG_DEFAULT_SCALE = 0.6
@@ -50,6 +53,13 @@ def set_cam_overlays(overlays: Dict[str, List[Dict[str, Any]]]):
     global _cam_overlays
     with _cam_ov_lock:
         _cam_overlays = overlays or {}
+
+def set_class_map(cls_map: Dict[int, str]):
+    """DetectionAPI의 class_id→label 맵을 1회 주입"""
+    global _class_map
+    if isinstance(cls_map, dict):
+        _class_map = {int(k): str(v) for k, v in cls_map.items()}
+        print(f"✅ class_map 주입됨: {len(_class_map)} classes")
 
 def _get_cam_overlays(cam_name: str) -> List[Dict[str, Any]]:
     with _cam_ov_lock:
@@ -77,6 +87,35 @@ def _color_for_id(track_id: Optional[int]) -> tuple:
         return (0, 255, 0)
     h = (int(track_id) * 2654435761) & 0xFFFFFFFF
     return (h & 255, (h >> 8) & 255, (h >> 16) & 255)
+
+def _resolve_label(item: Dict[str, Any]) -> str:
+    """
+    TrackingAPI 결과값을 활용한 라벨 해석:
+      1) item['label']이 있고 'unknown'이 아니면 사용
+      2) class_id가 있고 _class_map에 있으면 사용
+      3) class_id만 있으면 str(class_id)
+      4) 기본 'obj'
+    """
+    label = item.get("label")
+    cid = item.get("class_id", None)
+
+    # 1) 명시적인 라벨이 있고 유효하면 사용
+    if isinstance(label, str) and label.strip() and label.lower() not in ["unknown", "obj"]:
+        # class_id가 있으면 id도 보조로 표기
+        if isinstance(cid, (int, np.integer)) and int(cid) >= 0:
+            return f"{label}({int(cid)})"
+        return label
+
+    # 2) class_id를 통해 _class_map에서 찾기
+    if isinstance(cid, (int, np.integer)):
+        cid_int = int(cid)
+        if cid_int >= 0 and cid_int in _class_map:
+            return f"{_class_map[cid_int]}({cid_int})"
+        elif cid_int >= 0:
+            return f"class_{cid_int}"
+
+    # 3) 기본값
+    return "obj"
 
 def _norm_bbox_to_xyxy(bbox, img_w, img_h, it) -> Optional[tuple]:
     if bbox is None:
@@ -106,12 +145,12 @@ def _norm_bbox_to_xyxy(bbox, img_w, img_h, it) -> Optional[tuple]:
     x1 = y1 = x2 = y2 = None
     fmt = (it.get("format") or "").lower()
 
-    # xyxy 동의어(tlbr) 허용
+    # xyxy 동의어, tlwh 명시 지원
     if fmt in ("xyxy", "x1y1x2y2", "tlbr"):
         x1_, y1_, x2_, y2_ = arr[:4]
         x1, y1, _, _ = scale_fn(x1_, y1_)
         x2, y2, _, _ = scale_fn(x2_, y2_)
-    elif fmt == "xywh":
+    elif fmt == "xywh" or fmt == "tlwh":
         x, y, w, h = arr[:4]
         x, y, w, h = scale_fn(x, y, w, h)
         x1, y1, x2, y2 = x, y, x + w, y + h
@@ -146,28 +185,63 @@ def _norm_bbox_to_xyxy(bbox, img_w, img_h, it) -> Optional[tuple]:
 
 def _draw_overlays(img_bgr: np.ndarray, items: List[Dict[str, Any]]) -> np.ndarray:
     H, W = img_bgr.shape[:2]
-    print(f"[DEBUG] _draw_overlays: image size {W}x{H}, {len(items)} items")
+    print(f"[DEBUG] _draw_overlays: processing {len(items)} items on image {W}x{H}")
+    
     for i, it in enumerate(items):
-        bbox = it.get("bbox")
-        xyxy = _norm_bbox_to_xyxy(bbox, W, H, it)
+        print(f"[DEBUG] item {i}: {it}")
+        
+        xyxy = _norm_bbox_to_xyxy(it.get("bbox"), W, H, it)
         if xyxy is None:
-            print(f"[DEBUG] Item {i}: unusable bbox → {bbox}")
+            print(f"[DEBUG] item {i}: bbox normalization failed")
             continue
+            
         x1, y1, x2, y2 = xyxy
+        print(f"[DEBUG] item {i}: normalized bbox = ({x1}, {y1}, {x2}, {y2})")
+        
+        # 바운딩 박스가 유효한지 확인
+        if x2 <= x1 or y2 <= y1 or x1 < 0 or y1 < 0 or x2 >= W or y2 >= H:
+            print(f"[DEBUG] item {i}: invalid bbox coordinates")
+            continue
+            
         tid = it.get("track_id")
         color = _color_for_id(tid)
-        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 2)
-        label = it.get("label", "obj")
+        
+        # 바운딩 박스 그리기 (더 두꺼운 선으로)
+        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 3)
+        
+        # 라벨 정보 구성
+        text_parts = []
+        
+        # Track ID 표시
+        if tid is not None:
+            text_parts.append(f"ID:{tid}")
+        
+        # 클래스 정보 표시
+        label = _resolve_label(it)
+        if label and label != "obj":
+            text_parts.append(label)
+        
+        # 신뢰도 표시
         score = it.get("score", None)
-        tid_txt = f" #{tid}" if tid is not None else ""
-        s_txt = f" {score:.2f}" if isinstance(score, (int, float)) else ""
-        text = f"{label}{s_txt}{tid_txt}"
-        (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        tx1, ty1 = x1, max(0, y1 - (th + 6))
-        tx2, ty2 = x1 + tw + 6, y1
+        if isinstance(score, (int, float)):
+            text_parts.append(f"{score:.2f}")
+        
+        text = " ".join(text_parts) if text_parts else "obj"
+        
+        # 텍스트 배경 그리기
+        (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        tx1, ty1 = x1, max(0, y1 - (th + 8))
+        tx2, ty2 = x1 + tw + 8, y1
+        
+        # 텍스트 배경
         cv2.rectangle(img_bgr, (tx1, ty1), (tx2, ty2), color, -1)
-        cv2.putText(img_bgr, text, (x1 + 3, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        
+        # 텍스트 그리기 (흰색으로 더 선명하게)
+        cv2.putText(img_bgr, text, (x1 + 4, y1 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        print(f"[DEBUG] item {i}: drawn bbox and label '{text}'")
+    
     return img_bgr
 
 def _extract_frame_pair(stream_obj: Any) -> Tuple[Optional[np.ndarray], Optional[bytes]]:
@@ -180,12 +254,10 @@ def _extract_frame_pair(stream_obj: Any) -> Tuple[Optional[np.ndarray], Optional
     for attr in _JPEG_ATTRS:
         data = getattr(stream_obj, attr, None)
         if isinstance(data, (bytes, bytearray)) and len(data) > 100:
-            # 디코드 가능한지 시도
             arr = np.frombuffer(data, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if img is not None:
                 return img, bytes(data)
-            # 못 디코드면 계속 시도
     # 2) BGR ndarray 속성
     for attr in _BGR_ATTRS:
         img = getattr(stream_obj, attr, None)
@@ -205,16 +277,18 @@ async def debug():
     stream_info = {}
     with _cam_ov_lock:
         ov_counts = {k: len(v) for k, v in _cam_overlays.items()}
+        overlay_details = {k: v for k, v in _cam_overlays.items()}
+    
     for name, stream in _cam_streams.items():
         info = {"has_frame": False, "frame_type": None, "frame_size": 0,
                 "is_alive": False, "overlays": ov_counts.get(name, 0)}
         try:
-            # 어떤 속성으로 프레임이 있는지 스캔
             img, jpg = _extract_frame_pair(stream)
             if img is not None:
                 info["has_frame"] = True
                 info["frame_type"] = "bgr"
                 info["frame_size"] = int(img.size)
+                info["frame_shape"] = list(img.shape)
             elif jpg is not None:
                 info["has_frame"] = True
                 info["frame_type"] = "jpeg"
@@ -234,6 +308,10 @@ async def debug():
         "cam_stream_count": len(_cam_streams),
         "stream_info": stream_info,
         "overlay_keys": list(_cam_overlays.keys()),
+        "overlay_counts": ov_counts,
+        "overlay_details": overlay_details,
+        "class_map": _class_map,
+        "class_map_size": len(_class_map),
         "timestamp": time.time(),
     }
 
@@ -244,6 +322,7 @@ async def overlay_keys():
             "stream_keys": list(_cam_streams.keys()),
             "overlay_keys": list(_cam_overlays.keys()),
             "overlay_counts": {k: len(v) for k, v in _cam_overlays.items()},
+            "class_map_size": len(_class_map),
         })
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -373,6 +452,8 @@ def index():
           <p>• <strong>Multi-Camera System:</strong> shared model</p>
           <p>• <strong>Real-time:</strong> Detection → Tracking → Homography</p>
           <p>• <strong>Connected Streams:</strong> {len(_cam_streams)} cameras</p>
+          <p>• <strong>Classes:</strong> {_class_map and len(_class_map) or 0}</p>
+          <p>• <strong>Debug:</strong> <a href="/debug" target="_blank" style="color: var(--accent);">Debug Info</a> | <a href="/overlay_keys" target="_blank" style="color: var(--accent);">Overlay Keys</a></p>
         </div>
       </body>
     </html>
@@ -444,7 +525,6 @@ async def stream_cam(cam_name: str, scale: float = 1.0):
 
                         overlays = _get_cam_overlays(cam_name)
                         if overlays:
-                            print(f"[DEBUG] {cam_name}: {len(overlays)} overlays found")
                             img_bgr = _draw_overlays(img_bgr, overlays)
 
                         # 스케일 다운
