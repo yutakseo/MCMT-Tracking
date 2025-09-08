@@ -91,17 +91,17 @@ class WebServerManager:
             # 1) 기존 8000 살아있으면 재사용
             if self._port_in_use(self.web_port):
                 if self._probe_healthz(f"http://127.0.0.1:{self.web_port}/healthz"):
-                    print(f"♻️ 기존 웹 서버 재사용: http://localhost:{self.web_port}")
+                    print(f"기존 웹 서버 재사용: http://localhost:{self.web_port}")
                     self.web_url = f"http://localhost:{self.web_port}"
                     return True
                 else:
                     # 2) 헬스체크 실패 → 빈 포트로 이동
                     new_port = self._find_free_port()
-                    print(f"⚠️ 8000 사용중(헬스 실패). 포트를 {new_port}로 변경합니다.")
+                    print(f"8000 사용중(헬스 실패). 포트를 {new_port}로 변경합니다.")
                     self.web_port = new_port
                     self.web_url = f"http://localhost:{self.web_port}"
 
-            print("🌐 웹 서버(동일 프로세스 스레드) 시작 중...")
+            print("웹 서버(동일 프로세스 스레드) 시작 중...")
             def _run():
                 uvicorn.run(app, host="0.0.0.0", port=self.web_port, log_level="info")
             self.web_thread = threading.Thread(target=_run, daemon=True)
@@ -110,27 +110,27 @@ class WebServerManager:
             # 부팅 대기 및 헬스체크
             for _ in range(40):
                 if self._probe_healthz(f"http://127.0.0.1:{self.web_port}/healthz"):
-                    print(f"✅ 웹 서버 시작 완료: {self.web_url}")
+                    print(f"웹 서버 시작 완료: {self.web_url}")
                     return True
                 time.sleep(0.2)
 
-            print("❌ 웹 서버 시작 확인 실패(헬스체크 타임아웃)")
+            print("웹 서버 시작 확인 실패(헬스체크 타임아웃)")
             return False
 
         except Exception as e:
-            print(f"❌ 웹 서버 시작 오류: {e}")
+            print(f"웹 서버 시작 오류: {e}")
             return False
 
     def open_browser(self):
         try:
-            print("🌐 웹 브라우저 열기...")
+            print("웹 브라우저 열기...")
             webbrowser.open(self.web_url)
-            print(f"✅ 브라우저에서 {self.web_url} 열림")
+            print(f"브라우저에서 {self.web_url} 열림")
         except Exception as e:
-            print(f"❌ 브라우저 열기 실패: {e} → 수동 접속: {self.web_url}")
+            print(f"브라우저 열기 실패: {e} → 수동 접속: {self.web_url}")
 
     def stop_web_server(self):
-        print("ℹ️ uvicorn 스레드는 프로세스 종료 시 함께 정리됩니다.")
+        print("uvicorn 스레드는 프로세스 종료 시 함께 정리됩니다.")
 
 # =============================================================================
 # 단일 모델 공유 시스템
@@ -149,7 +149,7 @@ class MultiCameraSystem:
 
     def initialize_shared_models(self):
         """단일 모델 인스턴스 생성 (모든 카메라가 공유)"""
-        print("📦 단일 모델 로드 중...")
+        print("단일 모델 로드 중...")
         args = Args()
         det_models = ["vehicle"]
 
@@ -162,18 +162,18 @@ class MultiCameraSystem:
         )
 
         self.shared_tracker = TrackerAPI(args=args, detector=self.shared_detector)
-        print("✅ 단일 모델 로드 완료")
+        print("단일 모델 로드 완료")
 
         # GPU 메모리 사용량 확인
         import torch
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**3
-            print(f"💾 GPU 메모리 사용량: {allocated:.2f}GB (단일 모델 공유)")
+            print(f"GPU 메모리 사용량: {allocated:.2f}GB (단일 모델 공유)")
 
     def initialize_cameras(self):
         """카메라 초기화 (단일 모델 공유)"""
-        print("📷 카메라 초기화 중...")
-        print(f"🎥 카메라 소스: {CAMERA_SOURCES}")
+        print("카메라 초기화 중...")
+        print(f"카메라 소스: {CAMERA_SOURCES}")
 
         args = Args()
         plan_pts = [
@@ -202,37 +202,37 @@ class MultiCameraSystem:
                     tracker=self.shared_tracker     # 공유 트래커 주입
                 )
                 self.cameras.append(cam)
-                print(f"✅ Camera {i+1} 초기화 완료 (소스: {source})")
+                print(f"Camera {i+1} 초기화 완료 (소스: {source})")
             except Exception as e:
-                print(f"❌ Camera {i+1} 초기화 실패: {e}")
+                print(f"Camera {i+1} 초기화 실패: {e}")
                 self.cameras.append(None)
 
         # 성공한 카메라만 필터링
         self.cameras = [cam for cam in self.cameras if cam is not None]
-        print(f"🎯 총 {len(self.cameras)}개 카메라가 단일 모델을 공유합니다!")
+        print(f"총 {len(self.cameras)}개 카메라가 단일 모델을 공유합니다!")
 
     def initialize_visualization(self):
         """웹 시각화 초기화"""
-        print("🎨 웹 시각화 초기화 중...")
+        print("웹 시각화 초기화 중...")
 
         # 도면 파일 존재 확인
         if not os.path.exists(PLAN_PATH):
-            print(f"❌ 도면 파일이 없습니다: {PLAN_PATH}")
+            print(f"도면 파일이 없습니다: {PLAN_PATH}")
             return False
 
         try:
             self.viz = WebPlanViz(plan_path=PLAN_PATH, show_cam_points=False, fps_limit=12.0)
-            print("✅ WebPlanViz 초기화 완료")
+            print("WebPlanViz 초기화 완료")
         except Exception as e:
-            print(f"❌ WebPlanViz 초기화 실패: {e}")
+            print(f"WebPlanViz 초기화 실패: {e}")
             return False
 
         # RTSP 스트림 (웹에서 원본 영상 보기용)
-        print("📹 스트림 초기화 중...")
+        print("스트림 초기화 중...")
         self.streams = {}
         for i, source in enumerate(CAMERA_SOURCES):
             try:
-                print(f"🔗 Stream {i+1} 연결 시도 중... (소스: {source})")
+                print(f"Stream {i+1} 연결 시도 중... (소스: {source})")
 
                 stream = CamMJPEG(
                     name=f"cam{i+1}",
@@ -243,42 +243,42 @@ class MultiCameraSystem:
                 stream = stream.start()
 
                 # 연결 테스트 (3초 대기)
-                print(f"⏳ Stream {i+1} 연결 테스트 중...")
+                print(f"Stream {i+1} 연결 테스트 중...")
                 time.sleep(3)
 
                 if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
                     self.streams[f"cam{i+1}"] = stream
-                    print(f"✅ Stream {i+1} 초기화 완료 (소스: {source})")
+                    print(f"Stream {i+1} 초기화 완료 (소스: {source})")
                 else:
-                    print(f"⚠️ Stream {i+1} 연결 불안정 - 재시도 중...")
+                    print(f"Stream {i+1} 연결 불안정 - 재시도 중...")
                     stream.stop()
                     time.sleep(2)
                     stream = CamMJPEG(name=f"cam{i+1}", url=source, width=480, jpeg_quality=85).start()
                     time.sleep(3)
                     if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
                         self.streams[f"cam{i+1}"] = stream
-                        print(f"✅ Stream {i+1} 재연결 성공")
+                        print(f"Stream {i+1} 재연결 성공")
                     else:
-                        print(f"❌ Stream {i+1} 연결 실패 - 건너뜀")
+                        print(f"Stream {i+1} 연결 실패 - 건너뜀")
 
             except Exception as e:
-                print(f"❌ Stream {i+1} 초기화 실패: {e}")
+                print(f"Stream {i+1} 초기화 실패: {e}")
                 # 실패한 스트림은 테스트 영상으로 대체 (옵션)
                 try:
-                    print(f"🔄 Stream {i+1} 테스트 영상으로 대체...")
+                    print(f"Stream {i+1} 테스트 영상으로 대체...")
                     test_stream = self._create_test_stream(f"cam{i+1}")
                     if test_stream:
                         self.streams[f"cam{i+1}"] = test_stream
-                        print(f"✅ Stream {i+1} 테스트 영상으로 대체 완료")
+                        print(f"Stream {i+1} 테스트 영상으로 대체 완료")
                 except Exception as test_e:
-                    print(f"❌ Stream {i+1} 테스트 영상 생성 실패: {test_e}")
+                    print(f"Stream {i+1} 테스트 영상 생성 실패: {test_e}")
 
         # 웹 시각화와 스트림을 app_web.py에 연결 (같은 프로세스 전역에 주입)
         set_webviz(self.viz)
         set_cam_streams(self.streams)
-        print(f"🔗 WebPlanViz 연결: {self.viz is not None}")
-        print(f"✅ {len(self.streams)}개 카메라 스트림이 웹 서버에 연결되었습니다")
-        print("✅ 웹 시각화와 스트림 연결 완료")
+        print(f"WebPlanViz 연결: {self.viz is not None}")
+        print(f"{len(self.streams)}개 카메라 스트림이 웹 서버에 연결되었습니다")
+        print("웹 시각화와 스트림 연결 완료")
 
         return True
 
@@ -358,8 +358,8 @@ class MultiCameraSystem:
 
     async def run(self):
         """메인 실행 루프 - 순서: 카메라 → 웹서버 → 추론"""
-        print("🚀 멀티카메라 단일 모델 공유 시스템 시작")
-        print(f"🎥 RTSP 스트림: {CAMERA_SOURCES[0]}")
+        print("멀티카메라 단일 모델 공유 시스템 시작")
+        print(f"RTSP 스트림: {CAMERA_SOURCES[0]}")
 
         # 1단계: 카메라 초기화
         print("\n=== 1단계: 카메라 초기화 ===")
@@ -384,7 +384,7 @@ class MultiCameraSystem:
             except Exception:
                 pass
         else:
-            print("⚠️ 웹 서버 시작 실패 - 웹 시각화 비활성화")
+            print("❌ 웹 서버 시작 실패 - 웹 시각화 비활성화")
 
         # 4단계: 추론 엔진 초기화 및 실행
         print("\n=== 4단계: 추론 엔진 실행 ===")
@@ -496,7 +496,7 @@ class MultiCameraSystem:
 
     def cleanup(self):
         """리소스 정리"""
-        print("🧹 리소스 정리 중...")
+        print("리소스 정리 중...")
 
         # 웹 서버 종료 (동일 프로세스 스레드는 프로세스 종료 시 함께 종료)
         self.web_manager.stop_web_server()
@@ -529,7 +529,7 @@ class MultiCameraSystem:
         except:
             pass
 
-        print("✅ 정리 완료")
+        print("정리 완료")
 
 # =============================================================================
 # 메인 실행
