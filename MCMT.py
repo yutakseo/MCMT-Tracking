@@ -67,9 +67,9 @@ CAMERA_POINTS = [
 
 class TrackingArgs:
     """추적 시스템 설정"""
-    track_thresh = 0.3
+    track_thresh = 0.2
     match_thresh = 0.9
-    track_buffer = 180
+    track_buffer = 270
     mot20 = False
     cpu_workers = 20
     chunk_sec = 5.0

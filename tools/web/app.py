@@ -85,7 +85,7 @@ class MultiCameraWebApp:
                 candidates.append(getattr(core, "detector", None))
 
         seen = set()
-        cmap = {}
+        cmap: Dict[int, str] = {}
         for obj in candidates:
             if obj is None or id(obj) in seen:
                 continue
@@ -217,6 +217,7 @@ class MultiCameraWebApp:
 
         overlays: Dict[str, List[Dict[str, Any]]] = {}
 
+        # /cam/{key}와 1:1 매칭되는 스트림 키
         try:
             stream_names = list(self.tracking_system.streams.keys()) if self.tracking_system and self.tracking_system.streams else []
         except Exception:
@@ -230,12 +231,37 @@ class MultiCameraWebApp:
                 item["src_w"] = float(fw)
                 item["src_h"] = float(fh)
 
-        def _tlwh_or_xyxy_to_xyxy(b: np.ndarray) -> tuple:
-            x, y, w, h = b[:4]
-            if (w > 0 and h > 0) and not (b[2] > b[0] and b[3] > b[1]):
-                return float(x), float(y), float(x + w), float(y + h)
+        def _to_xyxy(b: np.ndarray, fmt: Optional[str] = None) -> tuple:
+            """
+            bbox를 xyxy로 변환.
+            - fmt 힌트가 있으면 우선 적용: 'xyxy' | 'xywh'/'tlwh' | 'cxcywh'
+            - 없으면 (c>a and d>b)이면 xyxy, (c>=0 and d>=0)이면 tlwh, 아니면 cxcywh 가정
+            """
+            a, b1, c, d = b[:4]
+            fmt = (fmt or "").lower()
+
+            if fmt in ("xyxy", "x1y1x2y2", "tlbr"):
+                return float(a), float(b1), float(c), float(d)
+            elif fmt in ("xywh", "tlwh"):
+                x, y, w, h = float(a), float(b1), float(c), float(d)
+                return x, y, x + w, y + h
+            elif fmt in ("cxcywh", "center"):
+                cx, cy, w, h = float(a), float(b1), float(c), float(d)
+                return cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0
+
+            # 휴리스틱
+            if c > a and d > b1:
+                # xyxy로 간주
+                return float(a), float(b1), float(c), float(d)
             else:
-                return float(b[0]), float(b[1]), float(b[2]), float(b[3]]
+                if c >= 0 and d >= 0:
+                    # tlwh
+                    x, y, w, h = float(a), float(b1), float(c), float(d)
+                    return x, y, x + w, y + h
+                else:
+                    # cxcywh
+                    cx, cy, w, h = float(a), float(b1), float(c), float(d)
+                    return cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0
 
         for idx, cam in enumerate(result.get("cameras") or []):
             items: List[Dict[str, Any]] = []
@@ -243,12 +269,14 @@ class MultiCameraWebApp:
             cam_name = stream_names[idx] if idx < len(stream_names) else f"cam{idx+1}"
             print(f"[DEBUG] {cam_name}: 카메라 처리 시작")
 
+            # 프레임 크기
             fh = fw = None
             shape = cam.get("frame_shape", None)
             if isinstance(shape, (list, tuple)) and len(shape) >= 2:
                 fh, fw = int(shape[0]), int(shape[1])
             print(f"[DEBUG] {cam_name}: frame_shape={shape}")
 
+            # ── TRACKLETS ──────────────────────────────────────────────────────
             tracklets_raw = cam.get("tracklets", None)
             if isinstance(tracklets_raw, list):
                 print(f"[DEBUG] {cam_name}: {len(tracklets_raw)} tracklets, {cam.get('detection_count', '?')} detections")
@@ -260,9 +288,12 @@ class MultiCameraWebApp:
                         b = np.asarray(bbox, dtype=float).reshape(-1)
                         if b.size < 4:
                             continue
-                        x1, y1, x2, y2 = _tlwh_or_xyxy_to_xyxy(b)
+                        fmt_hint = t.get("format")  # 있으면 사용
+                        x1, y1, x2, y2 = _to_xyxy(b, fmt_hint)
+
                         item = {
                             "bbox": [x1, y1, x2, y2],
+                            # label은 utils의 숫자문자열 필터에 걸리도록 'unknown' 권장
                             "label": t.get("label") or t.get("cls_name") or "unknown",
                             "score": float(t.get("score", 1.0)),
                             "track_id": t.get("id"),
@@ -276,6 +307,7 @@ class MultiCameraWebApp:
             elif tracklets_raw is not None:
                 print(f"[DEBUG] {cam_name}: tracklets 타입 비정상 -> {type(tracklets_raw)} (무시)")
 
+            # ── DETECTIONS (fallback) ──────────────────────────────────────────
             if not items:
                 det_raw = cam.get("detections", None)
                 print(f"[DEBUG] {cam_name}: tracklets 없음 → detections 사용 시도, 타입={type(det_raw)}")
@@ -286,6 +318,7 @@ class MultiCameraWebApp:
                 elif torch is not None and isinstance(det_raw, torch.Tensor):
                     det_arr = det_raw.detach().cpu().numpy()
 
+                # case A) ndarray / tensor: (N,6) [x1,y1,x2,y2,score,class_id]
                 if det_arr is not None:
                     if det_arr.ndim == 2 and det_arr.shape[1] >= 6 and det_arr.size > 0:
                         N = det_arr.shape[0]
@@ -295,7 +328,7 @@ class MultiCameraWebApp:
                                 x1, y1, x2, y2, score, cid = det_arr[i, 0:6].tolist()
                                 item = {
                                     "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                                    "label": "unknown",
+                                    "label": "unknown",  # overlay에서 class_map 사용
                                     "score": float(score),
                                     "track_id": None,
                                     "class_id": int(cid),
@@ -307,6 +340,8 @@ class MultiCameraWebApp:
                                 print(f"[DEBUG] {cam_name}: detection(np) {i} error: {e}")
                     else:
                         print(f"[DEBUG] {cam_name}: det_arr shape 불가: {getattr(det_arr, 'shape', None)}")
+
+                # case B) list[dict]
                 elif isinstance(det_raw, list) and det_raw:
                     all_dicts = all(isinstance(x, dict) for x in det_raw)
                     if all_dicts:
@@ -318,7 +353,8 @@ class MultiCameraWebApp:
                                 b = np.asarray(bbox, dtype=float).reshape(-1)
                                 if b.size < 4:
                                     continue
-                                x1, y1, x2, y2 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                                fmt_hint = d.get("format")
+                                x1, y1, x2, y2 = _to_xyxy(b, fmt_hint)
                                 item = {
                                     "bbox": [x1, y1, x2, y2],
                                     "label": d.get("label") or d.get("cls_name") or "unknown",
@@ -332,6 +368,7 @@ class MultiCameraWebApp:
                             except Exception as e:
                                 print(f"[DEBUG] {cam_name}: detection(dict) {i} error: {e}")
                     else:
+                        # list지만 dict가 아니면 행렬로 변환 시도
                         try:
                             det_arr = np.asarray(det_raw, dtype=float)
                         except Exception:

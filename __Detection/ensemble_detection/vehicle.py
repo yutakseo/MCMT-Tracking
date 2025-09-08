@@ -38,7 +38,6 @@ class VehicleDetector(DetectorBase):
         # 2) 모델 로드
         self._model = init_detector(config=config, checkpoint=checkpoint, device=device)
         print(f"[DEBUG] VehicleDetector loaded on device={device}")
-        print("Parameter device:", next(self._model.parameters()).device)
 
 
     # === 필수 프로퍼티 구현 ===

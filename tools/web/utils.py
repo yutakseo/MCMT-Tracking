@@ -1,3 +1,4 @@
+# /workspace/tools/web/utils.py
 """
 웹 관련 유틸리티 함수들
 - 오버레이 관리
@@ -15,36 +16,68 @@ import os
 # ───────────────────────────────────────────────────────────────────────────────
 class WebOverlayManager:
     """바운딩박스/라벨 오버레이 관리"""
-    def __init__(self):
+
+    def __init__(
+        self,
+        bbox_thickness: int = 2,   # 박스 선 굵기
+        font_scale: float = 0.5,   # 글자 크기
+        font_thickness: int = 1    # 글자(라벨) 선 굵기
+    ):
         self._overlays: Dict[str, List[Dict[str, Any]]] = {}
         self._class_map: Dict[int, str] = {}
         self._lock = threading.Lock()
 
+        # 스타일 옵션
+        self.bbox_thickness = int(bbox_thickness)
+        self.font_scale = float(font_scale)
+        self.font_thickness = int(font_thickness)
+
+    # 스타일 런타임 조정
+    def set_style(
+        self,
+        bbox_thickness: Optional[int] = None,
+        font_scale: Optional[float] = None,
+        font_thickness: Optional[int] = None,
+    ):
+        if bbox_thickness is not None:
+            self.bbox_thickness = max(1, int(bbox_thickness))
+        if font_scale is not None:
+            self.font_scale = max(0.1, float(font_scale))
+        if font_thickness is not None:
+            self.font_thickness = max(1, int(font_thickness))
+
     def set_overlays(self, overlays: Dict[str, List[Dict[str, Any]]]):
+        """오버레이 데이터 설정"""
         with self._lock:
             self._overlays = overlays or {}
 
     def set_class_map(self, cls_map: Dict[int, str]):
+        """클래스 맵 설정"""
         if isinstance(cls_map, dict):
             self._class_map = {int(k): str(v) for k, v in cls_map.items()}
             print(f"✅ class_map 설정됨: {len(self._class_map)} classes")
 
     def get_overlay_counts(self) -> Dict[str, int]:
+        """오버레이 개수 반환"""
         with self._lock:
             return {k: len(v) for k, v in self._overlays.items()}
 
     def get_overlay_details(self) -> Dict[str, List[Dict[str, Any]]]:
+        """오버레이 상세 정보 반환"""
         with self._lock:
             return {k: list(v) for k, v in self._overlays.items()}
 
     def get_class_map(self) -> Dict[int, str]:
+        """클래스 맵 반환"""
         return self._class_map.copy()
 
     def get_cam_overlays(self, cam_name: str) -> List[Dict[str, Any]]:
+        """특정 카메라의 오버레이 반환"""
         with self._lock:
             return list(self._overlays.get(cam_name, []))
 
     def _color_for_id(self, track_id: Optional[int]) -> tuple:
+        """Track ID에 따른 색상 생성"""
         if track_id is None:
             return (0, 255, 0)
         h = (int(track_id) * 2654435761) & 0xFFFFFFFF
@@ -65,7 +98,7 @@ class WebOverlayManager:
         if isinstance(label, str):
             lab = label.strip()
             if lab and lab.lower() not in ["unknown", "obj"]:
-                # 숫자 문자열(예: "0", "10")은 무시 → class_map 우선
+                # 숫자 문자열(예: "0", "10")은 무시하고 class_map 우선
                 is_numeric_like = lab.isdigit()
                 if not is_numeric_like:
                     try:
@@ -90,6 +123,7 @@ class WebOverlayManager:
         return "obj"
 
     def _norm_bbox_to_xyxy(self, bbox, img_w, img_h, it) -> Optional[tuple]:
+        """바운딩 박스를 xyxy 형식으로 정규화"""
         if bbox is None:
             return None
         try:
@@ -104,6 +138,7 @@ class WebOverlayManager:
         if isinstance(src_w, (int, float)) and isinstance(src_h, (int, float)) and src_w > 0 and src_h > 0:
             sx = img_w / float(src_w)
             sy = img_h / float(src_h)
+
             def scale_fn(x, y, w=None, h=None):
                 return (x * sx, y * sy, (w * sx if w is not None else None), (h * sy if h is not None else None))
         else:
@@ -117,6 +152,7 @@ class WebOverlayManager:
         x1 = y1 = x2 = y2 = None
         fmt = (it.get("format") or "").lower()
 
+        # xyxy 동의어, tlwh 명시 지원
         if fmt in ("xyxy", "x1y1x2y2", "tlbr"):
             x1_, y1_, x2_, y2_ = arr[:4]
             x1, y1, _, _ = scale_fn(x1_, y1_)
@@ -128,7 +164,7 @@ class WebOverlayManager:
         elif fmt in ("cxcywh", "center"):
             cx, cy, w, h = arr[:4]
             cx, cy, w, h = scale_fn(cx, cy, w, h)
-            x1, y1, x2, y2 = cx - w/2.0, cy - h/2.0, cx + w/2.0, cy + h/2.0
+            x1, y1, x2, y2 = cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0
         else:
             a, b, c, d = arr[:4]
             if c > a and d > b:
@@ -143,7 +179,7 @@ class WebOverlayManager:
                 else:
                     cx, cy, w, h = a, b, c, d
                     cx, cy, w, h = scale_fn(cx, cy, w, h)
-                    x1, y1, x2, y2 = cx - w/2.0, cy - h/2.0, cx + w/2.0, cy + h/2.0
+                    x1, y1, x2, y2 = cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0
 
         if x2 is None or y2 is None or x2 <= x1 or y2 <= y1:
             return None
@@ -155,6 +191,7 @@ class WebOverlayManager:
         return x1, y1, x2, y2
 
     def draw_overlays(self, img_bgr: np.ndarray, items: List[Dict[str, Any]]) -> np.ndarray:
+        """이미지에 오버레이 그리기"""
         H, W = img_bgr.shape[:2]
         print(f"[DEBUG] WebOverlayManager.draw_overlays: processing {len(items)} items on image {W}x{H}")
         print(f"[DEBUG] WebOverlayManager.draw_overlays: class_map = {self._class_map}")
@@ -175,8 +212,10 @@ class WebOverlayManager:
             tid = it.get("track_id")
             color = self._color_for_id(tid)
 
-            cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, 3)
+            # 바운딩 박스 (인스턴스 옵션 적용)
+            cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, self.bbox_thickness)
 
+            # 라벨 정보 구성
             text_parts = []
             if tid is not None:
                 text_parts.append(f"ID:{tid}")
@@ -188,13 +227,21 @@ class WebOverlayManager:
                 text_parts.append(f"{score:.2f}")
             text = " ".join(text_parts) if text_parts else "obj"
 
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            # 텍스트 배경/텍스트 (인스턴스 옵션 적용)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, self.font_scale, self.font_thickness)
             tx1, ty1 = x1, max(0, y1 - (th + 8))
             tx2, ty2 = x1 + tw + 8, y1
-            cv2.rectangle(img_bgr, (tx1, ty1), (tx2, ty2), color, -1)
-            cv2.putText(img_bgr, text, (x1 + 4, y1 - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.rectangle(img_bgr, (tx1, ty1), (tx2, ty2), color, -1)  # 배경 채우기
+            # (선택) 배경 테두리 강조: cv2.rectangle(img_bgr, (tx1, ty1), (tx2, ty2), color, 1)
+
+            cv2.putText(
+                img_bgr, text, (x1 + 4, y1 - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, self.font_scale, (255, 255, 255),
+                self.font_thickness, cv2.LINE_AA
+            )
+
             print(f"[DEBUG] WebOverlayManager item {i}: drawn bbox and label '{text}'")
+
         return img_bgr
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -202,25 +249,33 @@ class WebOverlayManager:
 # ───────────────────────────────────────────────────────────────────────────────
 class WebStreamManager:
     """카메라 스트림 관리"""
+
     def __init__(self):
         self._streams: Dict[str, Any] = {}
+
+        # 프레임 추출 시도 순서 (속성명)
         self._JPEG_ATTRS = ("_jpg", "jpg", "last_jpeg", "jpeg", "jpeg_bytes")
         self._BGR_ATTRS  = ("bgr", "frame", "last_frame", "image", "_frame")
 
     def set_streams(self, streams: Dict[str, Any]):
+        """스트림 설정"""
         self._streams = streams or {}
 
     def get_streams(self) -> Dict[str, Any]:
+        """모든 스트림 반환"""
         return self._streams.copy()
 
     def get_stream(self, name: str) -> Optional[Any]:
+        """특정 스트림 반환"""
         return self._streams.get(name)
 
     def jpeg_from_ndarray(self, img: np.ndarray, quality: int = 85) -> bytes:
+        """numpy 배열을 JPEG 바이트로 변환"""
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
         return buf.tobytes() if ok else b""
 
     def fallback_plan_frame(self) -> bytes:
+        """기본 플랜 프레임 생성"""
         PLAN_IMG = "/workspace/assets/250904_homograph_coordinate-plane2.jpg"
         if os.path.exists(PLAN_IMG):
             img = cv2.imread(PLAN_IMG)
@@ -228,10 +283,16 @@ class WebStreamManager:
                 return self.jpeg_from_ndarray(img)
         black = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(black, "No Plan Image", (150, 240),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (200,200,200), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 2)
         return self.jpeg_from_ndarray(black)
 
     def extract_frame_pair(self, stream_obj: Any) -> Tuple[Optional[np.ndarray], Optional[bytes]]:
+        """
+        가능한 속성들을 모두 시도하여 최신 프레임을 가져온다.
+        반환: (img_bgr, jpg_bytes)
+          - 둘 중 하나만 있을 수도 있음 (나머지는 None)
+        """
+        # 1) JPEG 바이트 속성
         for attr in self._JPEG_ATTRS:
             data = getattr(stream_obj, attr, None)
             if isinstance(data, (bytes, bytearray)) and len(data) > 100:
@@ -239,8 +300,11 @@ class WebStreamManager:
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                 if img is not None:
                     return img, bytes(data)
+
+        # 2) BGR ndarray 속성
         for attr in self._BGR_ATTRS:
             img = getattr(stream_obj, attr, None)
             if isinstance(img, np.ndarray) and img.ndim >= 2 and img.size > 0:
                 return img, None
+
         return None, None
