@@ -1,6 +1,11 @@
-# /workspace/main.py - 멀티카메라 단일 모델 공유 시스템 (웹 자동 실행)
+# /workspace/main.py - Multi-Camera Tracking Web Server
+"""
+멀티카메라 추적 시스템 웹 서버 실행
+- MCMT.py의 핵심 시스템과 연동
+- 웹 서버 자동 실행 및 관리
+- 브라우저 자동 열기
+"""
 
-import os
 import logging
 import time
 import asyncio
@@ -9,58 +14,60 @@ import threading
 import webbrowser
 import socket
 import urllib.request
-from pathlib import Path
+from typing import List, Optional, Dict, Any
+
+import numpy as np
 
 sys.path.append("/workspace")
 
-from mmyolo.utils import register_all_modules
-register_all_modules()
-
-from MCMT_engine.stream_SCST import streamSCST
-from MCMT_engine.async_inference import AsyncEngine
-from tools.webviz import WebPlanViz
-from __Detection.detection_api import DetectionAPI
-from __Tracking.tracking_api import TrackerAPI
-from MCMT_engine.cam_stream import CamMJPEG
-
-# 같은 프로세스/스레드에서 uvicorn 실행을 위해 app과 setter를 가져옴
-import uvicorn
+# MCMT 핵심 시스템과 웹 앱 import
+from MCMT import create_tracking_system, MultiCameraTrackingSystem
 from app_web import app, set_webviz, set_cam_streams, set_cam_overlays
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s][%(levelname)s] %(message)s")
 
-# FFmpeg/RTSP 옵션 (지연 감소, 타임아웃 설정)
-os.environ.setdefault(
-    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|buffer_size;102400|max_delay;0|stimeout;5000000"
-)
 
 # =============================================================================
-# 설정 - 실시간 RTSP 스트림
+# 유틸: 배열/텐서의 진리값 평가를 피하기 위한 안전 래퍼
 # =============================================================================
-PLAN_PATH = "/workspace/assets/250904_homograph_coordinate-plane2.jpg"
+def _safe_seq(x) -> List[Any]:
+    """x가 None/Tensor/ndarray/iterable 어느 것이든 '불리언 평가 없이' 리스트로 돌려준다."""
+    if x is None:
+        return []
+    # 이미 리스트/튜플이면 즉시 복사
+    if isinstance(x, (list, tuple)):
+        return list(x)
+    # numpy/torch는 tolist 우선 시도
+    try:
+        if hasattr(x, "tolist"):
+            return x.tolist()
+    except Exception:
+        pass
+    # 마지막 시도: iterable로 캐스팅
+    try:
+        return list(x)
+    except Exception:
+        return []
 
-# RTSP 스트림 주소 (실시간 CCTV)
-CAMERA_SOURCES = [
-    "rtsp://210.99.70.120:1935/live/cctv001.stream",  # Camera 1
-    "rtsp://210.99.70.120:1935/live/cctv001.stream",  # Camera 2
-    "rtsp://210.99.70.120:1935/live/cctv001.stream",  # Camera 3
-]
+def _safe_points(x) -> List[Any]:
+    """plan_coords 처럼 포인트 묶음을 안전 변환."""
+    pts = _safe_seq(x)
+    # 각 원소도 2원소로 강제 변환(가능한 경우)
+    out = []
+    for p in pts:
+        try:
+            if isinstance(p, (list, tuple, np.ndarray)) and len(p) >= 2:
+                out.append((float(p[0]), float(p[1])))
+        except Exception:
+            continue
+    return out
 
-class Args:
-    track_thresh = 0.3
-    match_thresh = 0.9
-    track_buffer = 180
-    mot20 = False
-    cpu_workers = 20
-    chunk_sec = 5.0
-    batch_size = 10
 
 # =============================================================================
-# 웹 서버 자동 실행 (같은 프로세스/스레드)
+# 웹 서버 관리자
 # =============================================================================
 class WebServerManager:
-    """웹 서버 자동 관리 (동일 프로세스/스레드)"""
+    """웹 서버 자동 관리"""
 
     def __init__(self):
         self.web_thread = None
@@ -85,310 +92,114 @@ class WebServerManager:
                 return p
         raise RuntimeError("No free port found in range 8000-8100")
 
-    def start_web_server(self):
-        """uvicorn을 같은 프로세스에서 스레드로 실행. 이미 떠 있으면 재사용."""
+    def start_web_server(self) -> bool:
+        """웹 서버 시작"""
         try:
-            # 1) 기존 8000 살아있으면 재사용
+            # 기존 서버 재사용 시도
             if self._port_in_use(self.web_port):
                 if self._probe_healthz(f"http://127.0.0.1:{self.web_port}/healthz"):
-                    print(f"기존 웹 서버 재사용: http://localhost:{self.web_port}")
-                    self.web_url = f"http://localhost:{self.web_port}"
+                    print(f"♻️ 기존 웹 서버 재사용: {self.web_url}")
                     return True
                 else:
-                    # 2) 헬스체크 실패 → 빈 포트로 이동
+                    # 헬스체크 실패 → 새 포트 찾기
                     new_port = self._find_free_port()
-                    print(f"8000 사용중(헬스 실패). 포트를 {new_port}로 변경합니다.")
+                    print(f"⚠️ 포트 {self.web_port} 사용중(헬스 실패). 포트를 {new_port}로 변경합니다.")
                     self.web_port = new_port
                     self.web_url = f"http://localhost:{self.web_port}"
 
-            print("웹 서버(동일 프로세스 스레드) 시작 중...")
+            print("🌐 웹 서버 시작 중...")
+
             def _run():
+                import uvicorn
                 uvicorn.run(app, host="0.0.0.0", port=self.web_port, log_level="info")
+
             self.web_thread = threading.Thread(target=_run, daemon=True)
             self.web_thread.start()
 
             # 부팅 대기 및 헬스체크
             for _ in range(40):
                 if self._probe_healthz(f"http://127.0.0.1:{self.web_port}/healthz"):
-                    print(f"웹 서버 시작 완료: {self.web_url}")
+                    print(f"✅ 웹 서버 시작 완료: {self.web_url}")
                     return True
                 time.sleep(0.2)
 
-            print("웹 서버 시작 확인 실패(헬스체크 타임아웃)")
+            print("❌ 웹 서버 시작 확인 실패(헬스체크 타임아웃)")
             return False
 
         except Exception as e:
-            print(f"웹 서버 시작 오류: {e}")
+            print(f"❌ 웹 서버 시작 오류: {e}")
             return False
 
     def open_browser(self):
+        """웹 브라우저 자동 열기"""
         try:
-            print("웹 브라우저 열기...")
+            print("🌐 웹 브라우저 열기...")
             webbrowser.open(self.web_url)
-            print(f"브라우저에서 {self.web_url} 열림")
+            print(f"✅ 브라우저에서 {self.web_url} 열림")
         except Exception as e:
-            print(f"브라우저 열기 실패: {e} → 수동 접속: {self.web_url}")
+            print(f"❌ 브라우저 열기 실패: {e}")
+            print(f"수동으로 {self.web_url}에 접속하세요")
 
     def stop_web_server(self):
-        print("uvicorn 스레드는 프로세스 종료 시 함께 정리됩니다.")
+        """웹 서버 종료"""
+        print("ℹ️ uvicorn 스레드는 프로세스 종료 시 함께 정리됩니다.")
+
 
 # =============================================================================
-# 단일 모델 공유 시스템
+# 메인 애플리케이션
 # =============================================================================
-class MultiCameraSystem:
-    """멀티카메라 단일 모델 공유 시스템"""
+class MultiCameraWebApp:
+    """멀티카메라 웹 애플리케이션"""
 
-    def __init__(self):
-        self.shared_detector = None
-        self.shared_tracker = None
-        self.cameras = []
-        self.engine = None
-        self.viz = None
-        self.streams = None
+    def __init__(self, detector_models: Optional[List[str]] = None):
+        self.tracking_system: Optional[MultiCameraTrackingSystem] = None
         self.web_manager = WebServerManager()
-
-    def initialize_shared_models(self):
-        """단일 모델 인스턴스 생성 (모든 카메라가 공유)"""
-        print("단일 모델 로드 중...")
-        args = Args()
-        det_models = ["vehicle"]
-
-        self.shared_detector = DetectionAPI(
-            models=det_models,
-            thres=0.2,
-            device="cuda:0",
-            use_async=True,
-            max_workers=1,
-        )
-
-        self.shared_tracker = TrackerAPI(args=args, detector=self.shared_detector)
-        print("단일 모델 로드 완료")
-
-        # GPU 메모리 사용량 확인
-        import torch
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            print(f"GPU 메모리 사용량: {allocated:.2f}GB (단일 모델 공유)")
-
-    def initialize_cameras(self):
-        """카메라 초기화 (단일 모델 공유)"""
-        print("카메라 초기화 중...")
-        print(f"카메라 소스: {CAMERA_SOURCES}")
-
-        args = Args()
-        plan_pts = [
-            (1170, 214), (1170, 559), (1170, 904),
-            (2212, 214), (2212, 559), (2212, 904),
-            (3255, 214), (3255, 559), (3255, 904)
-        ]
-
-        # 각 카메라별 호모그래피 포인트
-        camera_points = [
-            [(1033,475), (948,474), (863,473), (1019,527), (890,524), (769,519), (973,667), (741,652), (548,620)],  # Camera 1
-            [(518,466), (430,471), (341,474), (613,510), (485,519), (354,527), (829,608), (634,645), (397,668)],   # Camera 2
-            [(357,602), (566,648), (832,683), (620,498), (754,509), (893,513), (726,453), (819,456), (911,459)]    # Camera 3
-        ]
-
-        self.cameras = []
-        for i, (source, cam_pts) in enumerate(zip(CAMERA_SOURCES, camera_points)):
-            try:
-                cam = streamSCST(
-                    source,
-                    cam_pts,
-                    PLAN_PATH,
-                    plan_pts,
-                    args,
-                    detector=self.shared_detector,  # 공유 모델 주입
-                    tracker=self.shared_tracker     # 공유 트래커 주입
-                )
-                self.cameras.append(cam)
-                print(f"Camera {i+1} 초기화 완료 (소스: {source})")
-            except Exception as e:
-                print(f"Camera {i+1} 초기화 실패: {e}")
-                self.cameras.append(None)
-
-        # 성공한 카메라만 필터링
-        self.cameras = [cam for cam in self.cameras if cam is not None]
-        print(f"총 {len(self.cameras)}개 카메라가 단일 모델을 공유합니다!")
-
-    def initialize_visualization(self):
-        """웹 시각화 초기화"""
-        print("웹 시각화 초기화 중...")
-
-        # 도면 파일 존재 확인
-        if not os.path.exists(PLAN_PATH):
-            print(f"도면 파일이 없습니다: {PLAN_PATH}")
-            return False
-
-        try:
-            self.viz = WebPlanViz(plan_path=PLAN_PATH, show_cam_points=False, fps_limit=12.0)
-            print("WebPlanViz 초기화 완료")
-        except Exception as e:
-            print(f"WebPlanViz 초기화 실패: {e}")
-            return False
-
-        # RTSP 스트림 (웹에서 원본 영상 보기용)
-        print("스트림 초기화 중...")
-        self.streams = {}
-        for i, source in enumerate(CAMERA_SOURCES):
-            try:
-                print(f"Stream {i+1} 연결 시도 중... (소스: {source})")
-
-                stream = CamMJPEG(
-                    name=f"cam{i+1}",
-                    url=source,
-                    width=480,
-                    jpeg_quality=85
-                )
-                stream = stream.start()
-
-                # 연결 테스트 (3초 대기)
-                print(f"Stream {i+1} 연결 테스트 중...")
-                time.sleep(3)
-
-                if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
-                    self.streams[f"cam{i+1}"] = stream
-                    print(f"Stream {i+1} 초기화 완료 (소스: {source})")
-                else:
-                    print(f"Stream {i+1} 연결 불안정 - 재시도 중...")
-                    stream.stop()
-                    time.sleep(2)
-                    stream = CamMJPEG(name=f"cam{i+1}", url=source, width=480, jpeg_quality=85).start()
-                    time.sleep(3)
-                    if getattr(stream, "_jpg", None) and len(stream._jpg) > 1000:
-                        self.streams[f"cam{i+1}"] = stream
-                        print(f"Stream {i+1} 재연결 성공")
-                    else:
-                        print(f"Stream {i+1} 연결 실패 - 건너뜀")
-
-            except Exception as e:
-                print(f"Stream {i+1} 초기화 실패: {e}")
-                # 실패한 스트림은 테스트 영상으로 대체 (옵션)
-                try:
-                    print(f"Stream {i+1} 테스트 영상으로 대체...")
-                    test_stream = self._create_test_stream(f"cam{i+1}")
-                    if test_stream:
-                        self.streams[f"cam{i+1}"] = test_stream
-                        print(f"Stream {i+1} 테스트 영상으로 대체 완료")
-                except Exception as test_e:
-                    print(f"Stream {i+1} 테스트 영상 생성 실패: {test_e}")
-
-        # 웹 시각화와 스트림을 app_web.py에 연결 (같은 프로세스 전역에 주입)
-        set_webviz(self.viz)
-        set_cam_streams(self.streams)
-        print(f"WebPlanViz 연결: {self.viz is not None}")
-        print(f"{len(self.streams)}개 카메라 스트림이 웹 서버에 연결되었습니다")
-        print("웹 시각화와 스트림 연결 완료")
-
-        return True
-
-    def _create_test_stream(self, name: str):
-        """테스트용 스트림 생성 (RTSP 연결 실패 시 대체)"""
-        try:
-            import cv2
-            import numpy as np
-
-            class TestStream:
-                def __init__(self, name):
-                    self.name = name
-                    self._jpg = None
-                    self._counter = 0
-                    self._lock = threading.Lock()
-                    self._stop = False
-                    self._th = threading.Thread(target=self._test_loop, daemon=True)
-                    self._th.start()
-
-                def _test_loop(self):
-                    while not self._stop:
-                        try:
-                            h, w = 480, 640
-                            xs = np.linspace(0, 1, w, dtype=np.float32)
-                            ys = np.linspace(0, 1, h, dtype=np.float32)
-                            grad_x = (xs * 255).astype(np.uint8)[None, :].repeat(h, axis=0)
-                            grad_y = (ys * 255).astype(np.uint8)[:, None].repeat(w, axis=1)
-                            r_val = int((0.5 + 0.5*np.sin(self._counter*0.1)) * 255)
-                            r = np.full_like(grad_x, r_val)
-                            img = np.dstack([grad_x, grad_y, r])
-
-                            cv2.putText(img, f"TEST STREAM: {self.name}", (50, 100),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                            cv2.putText(img, "RTSP Connection Failed", (50, 150),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                            cv2.putText(img, f"Time: {time.strftime('%H:%M:%S')}", (50, 200),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-                            cx = int(320 + 200 * np.sin(self._counter * 0.1))
-                            cy = int(240 + 100 * np.cos(self._counter * 0.1))
-                            cv2.circle(img, (cx, cy), 30, (255, 255, 0), -1)
-
-                            _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
-                            with self._lock:
-                                self._jpg = buffer.tobytes()
-
-                            self._counter += 1
-                            time.sleep(0.1)  # ~10 FPS
-
-                        except Exception as e:
-                            print(f"Test stream error: {e}")
-                            time.sleep(1)
-
-                def stop(self):
-                    self._stop = True
-                    if self._th and self._th.is_alive():
-                        self._th.join(timeout=1.0)
-
-            return TestStream(name)
-
-        except Exception as e:
-            print(f"Test stream creation failed: {e}")
-            return None
-
-    def initialize_engine(self):
-        """비동기 추론 엔진 초기화"""
-        self.engine = AsyncEngine(
-            self.cameras,
-            interval=0.3,
-            gpu_warning=90.0,      # 90% 이상: 프레임 스킵
-            gpu_danger=95.0,       # 95% 이상: 추론 스킵
-            gpu_critical=98.0,     # 98% 이상: 완전 정지
-            gpu_recovery=85.0,     # 85% 이하: 정상 복구
-            gpu_id=0
-        )
+        self.detector_models = detector_models
 
     async def run(self):
-        """메인 실행 루프 - 순서: 카메라 → 웹서버 → 추론"""
-        print("멀티카메라 단일 모델 공유 시스템 시작")
-        print(f"RTSP 스트림: {CAMERA_SOURCES[0]}")
+        """메인 실행 루프"""
+        print("🚀 멀티카메라 추적 웹 시스템 시작")
 
-        # 1단계: 카메라 초기화
-        print("\n=== 1단계: 카메라 초기화 ===")
-        self.initialize_shared_models()
-        self.initialize_cameras()
+        try:
+            # 1단계: 추적 시스템 초기화
+            print("\n=== 1단계: 추적 시스템 초기화 ===")
+            if self.detector_models:
+                print(f"🎯 사용할 탐지 모델: {self.detector_models}")
+            self.tracking_system = create_tracking_system(detector_models=self.detector_models)
+            print("✅ 추적 시스템 초기화 완료")
 
-        if not self.cameras:
-            print("❌ 초기화된 카메라가 없습니다. 프로그램을 종료합니다.")
+            # 2단계: 웹 서버 시작
+            print("\n=== 2단계: 웹 서버 시작 ===")
+            if self.web_manager.start_web_server():
+                # 웹 시각화와 스트림을 웹 서버에 연결
+                if getattr(self.tracking_system, "viz", None):
+                    set_webviz(self.tracking_system.viz)
+                if getattr(self.tracking_system, "streams", None):
+                    set_cam_streams(self.tracking_system.streams)
+
+                # 브라우저 자동 열기
+                self.web_manager.open_browser()
+            else:
+                print("❌ 웹 서버 시작 실패 - 웹 인터페이스 비활성화")
+
+            # 3단계: 추론 엔진 실행
+            print("\n=== 3단계: 추론 엔진 실행 ===")
+            await self._run_inference_loop()
+
+        except KeyboardInterrupt:
+            print("\n⏹️ 사용자에 의해 중지됨")
+        except Exception as e:
+            print(f"❌ 시스템 오류: {e}")
+        finally:
+            self.cleanup()
+
+    async def _run_inference_loop(self):
+        """추론 루프 실행"""
+        if not self.tracking_system or not self.tracking_system.engine:
+            print("❌ 추론 엔진이 초기화되지 않았습니다")
             return
 
-        # 2단계: 웹 시각화 초기화
-        print("\n=== 2단계: 웹 시각화 초기화 ===")
-        if not self.initialize_visualization():
-            print("❌ 웹 시각화 초기화 실패. 프로그램을 종료합니다.")
-            return
-
-        # 3단계: 웹 서버 시작 (같은 프로세스/스레드)
-        print("\n=== 3단계: 웹 서버 시작 ===")
-        if self.web_manager.start_web_server():
-            try:
-                self.web_manager.open_browser()  # 선택
-            except Exception:
-                pass
-        else:
-            print("❌ 웹 서버 시작 실패 - 웹 시각화 비활성화")
-
-        # 4단계: 추론 엔진 초기화 및 실행
-        print("\n=== 4단계: 추론 엔진 실행 ===")
-        self.initialize_engine()
+        print("🔄 추론 루프 시작...")
 
         # 스톨 감지용 변수
         last_seen = {"t": time.time(), "round": -1}
@@ -406,68 +217,57 @@ class MultiCameraSystem:
             wd_task = asyncio.create_task(watchdog(20, stall_evt))
 
             try:
-                async for result in self.engine.stream():
+                async for result in self.tracking_system.engine.stream():
                     if stall_evt.is_set():
                         break
 
                     last_seen["t"] = time.time()
-                    last_seen["round"] = result["round"]
+                    last_seen["round"] = result.get("round", -1)
 
-                    # 모든 카메라의 좌표/오버레이 수집
-                    all_coords = []
-                    coords_per_cam = []
-                    overlays = {}
+                    # 오버레이 데이터 생성 및 전달
+                    overlays = self._create_overlays(result)
+                    logging.debug(f"[OVERLAY] counts: {{ {', '.join(f'{k}: {len(v)}' for k, v in overlays.items())} }}")
 
-                    for idx, cam in enumerate(result["cameras"]):
-                        # plan 좌표
-                        pts = cam.get("plan_coords", [])
+                    # 스트림 키와 오버레이 키가 일치하는지 점검
+                    try:
+                        stream_names = list(self.tracking_system.streams.keys())
+                        missing = [k for k in overlays.keys() if k not in stream_names]
+                        if missing:
+                            logging.warning(f"[OVERLAY] keys not in streams: {missing} | streams={stream_names}")
+                    except Exception:
+                        pass
+
+                    set_cam_overlays(overlays)
+
+                    # 좌표 취합 (불리언 평가 없이 안전 처리)
+                    all_coords: List[Any] = []
+                    coords_per_cam: List[List[Any]] = []
+                    for cam in _safe_seq(result.get("cameras")):
+                        pts = _safe_points(cam.get("plan_coords"))
                         all_coords.extend(pts)
                         coords_per_cam.append(pts)
 
-                        # 오버레이 (tracks 우선 → detections 보조)
-                        items = []
-                        for t in (cam.get("tracks") or []):
-                            bbox = t.get("bbox") or t.get("tlbr") or t.get("xyxy")
-                            if bbox and len(bbox) >= 4:
-                                items.append({
-                                    "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                                    "label": t.get("label") or t.get("cls_name") or "obj",
-                                    "score": float(t.get("score", 1.0)),
-                                    "track_id": t.get("track_id") or t.get("id")
-                                })
-                        if not items:
-                            for d in (cam.get("detections") or []):
-                                bbox = d.get("bbox") or d.get("tlbr") or d.get("xyxy")
-                                if bbox and len(bbox) >= 4:
-                                    items.append({
-                                        "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                                        "label": d.get("label") or d.get("cls_name") or "obj",
-                                        "score": float(d.get("score", 1.0)),
-                                        "track_id": None
-                                    })
-                        overlays[f"cam{idx+1}"] = items
-
-                    # 웹 시각화 업데이트 (키 이름: coords)
-                    if self.viz:
-                        self.viz.update({
-                            "round": result["round"],
-                            "timestamp": result["timestamp"],
-                            "fused": all_coords,
-                            "coords": coords_per_cam,
-                        })
-
-                    # 카메라 뷰 오버레이 주입
-                    set_cam_overlays(overlays)
+                    # 웹 시각화 업데이트
+                    if getattr(self.tracking_system, "viz", None):
+                        try:
+                            self.tracking_system.viz.update({
+                                "round": result.get("round"),
+                                "timestamp": result.get("timestamp"),
+                                "fused": all_coords,
+                                "coords": coords_per_cam,
+                            })
+                        except Exception as e:
+                            logging.error(f"[VIZ] update failed: {e}")
 
                     # 로깅
                     gpu_state = result.get("gpu_state", "UNKNOWN")
-                    gpu_util = result.get("gpu_utilization", 0)
-                    batch_time = result.get("batch_time", 0)
+                    gpu_util = result.get("gpu_utilization", 0.0)
+                    batch_time = result.get("batch_time", 0.0)
                     total_detections = result.get("total_detections", 0)
                     total_tracks = result.get("total_tracks", 0)
 
                     logging.info(
-                        f"[SYSTEM] round={result['round']} objects={len(all_coords)} "
+                        f"[SYSTEM] round={result.get('round', -1)} objects={len(all_coords)} "
                         f"gpu={gpu_state}({gpu_util:.1f}%) batch={batch_time:.3f}s "
                         f"det={total_detections} track={total_tracks}"
                     )
@@ -477,71 +277,167 @@ class MultiCameraSystem:
             finally:
                 # 정리
                 try:
-                    self.engine.stop()
-                except:
+                    self.tracking_system.engine.stop()
+                except Exception:
                     pass
 
                 try:
                     wd_task.cancel()
-                except:
+                except Exception:
                     pass
 
                 try:
                     import torch
                     torch.cuda.empty_cache()
-                except:
+                except Exception:
                     pass
 
                 await asyncio.sleep(2)
 
+    def _create_overlays(self, result: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """추론 결과에서 오버레이 데이터 생성 (스트림 키와 이름을 정확히 매칭)"""
+        overlays: Dict[str, List[Dict[str, Any]]] = {}
+
+        # 현재 웹서버가 알고 있는 실제 스트림 키들 (index 순서 중요)
+        try:
+            stream_names = list(self.tracking_system.streams.keys()) if self.tracking_system and self.tracking_system.streams else []
+        except Exception:
+            stream_names = []
+
+        print(f"[DEBUG] _create_overlays: processing {len(_safe_seq(result.get('cameras')))} cameras")
+        print(f"[DEBUG] _create_overlays: stream_names = {stream_names}")
+
+        for idx, cam in enumerate(_safe_seq(result.get("cameras"))):
+            items: List[Dict[str, Any]] = []
+
+            # 1) 이름 매핑: cam dict에 name이 있으면 우선 사용, 없으면 streams 순서와 매칭, 최후엔 cam{idx+1}
+            cam_name = cam.get("name") or (stream_names[idx] if idx < len(stream_names) else f"cam{idx+1}")
+
+            # 2) 원본 프레임 크기
+            fh, fw = None, None
+            shape = cam.get("frame_shape")
+            if isinstance(shape, (list, tuple)) and len(shape) >= 2:
+                fh, fw = int(shape[0]), int(shape[1])
+            print(f"[DEBUG] {cam_name}: frame_shape={shape}")
+
+            # 3) 소스들 (불리언 평가 없이 안전 변환)
+            tracklets = _safe_seq(cam.get("tracklets"))
+            detections = _safe_seq(cam.get("detections"))
+            print(f"[DEBUG] {cam_name}: {len(tracklets)} tracklets, {len(detections)} detections")
+
+            # 4) tracklets → tlwh 가정하여 xyxy로 변환(이미 xyxy일 수 있어 휴리스틱)
+            for i, t in enumerate(tracklets):
+                try:
+                    if not isinstance(t, dict):
+                        # dict가 아니면 스킵 (포맷 미상)
+                        continue
+                    bbox = t.get("bbox")
+                    if bbox is None:
+                        continue
+
+                    # ndarray/텐서 안전 변환
+                    b = np.asarray(bbox, dtype=float).reshape(-1)
+                    if b.size < 4:
+                        continue
+
+                    # tlwh -> xyxy 또는 이미 xyxy
+                    x, y, w, h = b[:4]
+                    if (w > 0 and h > 0) and not (b[2] > b[0] and b[3] > b[1]):
+                        x1, y1, x2, y2 = x, y, x + w, y + h
+                    else:
+                        x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
+
+                    label = t.get("label") or t.get("cls_name") or "unknown"
+                    class_id = int(t.get("class_id", -1)) if t.get("class_id") is not None else -1
+                    if class_id != -1:
+                        label = f"{label}({class_id})"
+
+                    item: Dict[str, Any] = {
+                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                        "label": label,
+                        "score": float(t.get("score", 1.0)),
+                        "track_id": t.get("track_id") or t.get("id"),
+                        "class_id": class_id,
+                        "format": "xyxy",  # 명시적으로 xyxy로 표시
+                    }
+                    if fw and fh:
+                        item["src_w"] = float(fw)
+                        item["src_h"] = float(fh)
+                    items.append(item)
+                    # 상세 로그는 과다해질 수 있어 필요 시 주석 해제
+                    # print(f"[DEBUG] {cam_name}: tracklet {i} -> {item}")
+                except Exception as e:
+                    print(f"[DEBUG] {cam_name}: tracklet {i} error: {e}")
+
+            # 5) tracklets가 없으면 detections 사용 (DetectionAPI는 보통 xyxy)
+            if len(items) == 0:
+                for i, d in enumerate(detections):
+                    try:
+                        if not isinstance(d, dict):
+                            continue
+                        bbox = d.get("bbox")
+                        if bbox is None:
+                            continue
+
+                        b = np.asarray(bbox, dtype=float).reshape(-1)
+                        if b.size < 4:
+                            continue
+
+                        label = d.get("label") or d.get("cls_name") or "unknown"
+                        class_id = int(d.get("class_id", -1)) if d.get("class_id") is not None else -1
+                        if class_id != -1:
+                            label = f"{label}({class_id})"
+
+                        item: Dict[str, Any] = {
+                            "bbox": [float(b[0]), float(b[1]), float(b[2]), float(b[3])],
+                            "label": label,
+                            "score": float(d.get("score", 1.0)),
+                            "track_id": None,
+                            "class_id": class_id,
+                            "format": "xyxy",  # 명시
+                        }
+                        if fw and fh:
+                            item["src_w"] = float(fw)
+                            item["src_h"] = float(fh)
+                        items.append(item)
+                    except Exception as e:
+                        print(f"[DEBUG] {cam_name}: detection {i} error: {e}")
+
+            overlays[cam_name] = items
+            print(f"[DEBUG] {cam_name}: final items = {len(items)}")
+
+        return overlays
+
     def cleanup(self):
         """리소스 정리"""
-        print("리소스 정리 중...")
+        print("🧹 리소스 정리 중...")
 
-        # 웹 서버 종료 (동일 프로세스 스레드는 프로세스 종료 시 함께 종료)
+        # 웹 서버 종료
         self.web_manager.stop_web_server()
 
-        # 카메라 정리
-        for cam in self.cameras:
+        # 추적 시스템 정리
+        if self.tracking_system:
             try:
-                cam.close()
-            except:
+                self.tracking_system.cleanup()
+            except Exception:
                 pass
 
-        # 스트림 정리
-        if self.streams:
-            for stream in self.streams.values():
-                try:
-                    stream.stop()
-                except:
-                    pass
+        print("✅ 정리 완료")
 
-        # 공유 모델 정리
-        try:
-            del self.shared_detector, self.shared_tracker
-        except:
-            pass
-
-        # GPU 메모리 정리
-        try:
-            import torch
-            torch.cuda.empty_cache()
-        except:
-            pass
-
-        print("정리 완료")
 
 # =============================================================================
 # 메인 실행
 # =============================================================================
-async def main():
-    system = MultiCameraSystem()
-    try:
-        await system.run()
-    except KeyboardInterrupt:
-        print("\n중지됨")
-    finally:
-        system.cleanup()
+async def main(detector_models: Optional[List[str]] = None):
+    """메인 함수
+
+    Args:
+        detector_models: 사용할 탐지 모델 리스트 (예: ["vehicle"], ["ultra_people"], ["vehicle", "ultra_people"])
+    """
+    app = MultiCameraWebApp(detector_models=detector_models)
+    await app.run()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 3. 사람+작업자+차량
+    asyncio.run(main(detector_models=["ultra_people", "worker", "vehicle"]))

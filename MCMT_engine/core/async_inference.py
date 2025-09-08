@@ -8,8 +8,8 @@ import logging
 import torch
 from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
-from .stream_SCST import streamSCST
-from .gpu_monitor import GPUMonitor
+from ..streaming.stream_SCST import streamSCST
+from ..monitoring.gpu_monitor import GPUMonitor
 
 
 class AsyncEngine:
@@ -151,13 +151,16 @@ class AsyncEngine:
                 plan_coords = [item.get("pt") for item in projected 
                               if isinstance(item, dict) and "pt" in item]
                 
+                h, w = frame.shape[:2]
                 camera_results.append({
                     'camera_id': cam_idx + 1,
                     'detection_count': len(det_result) if hasattr(det_result, "__len__") else 0,
                     'tracking_count': len(tracklets) if hasattr(tracklets, "__len__") else 0,
                     'plan_coords': plan_coords,
                     'tracklets': tracklets,
-                    'projected': projected
+                    'projected': projected,
+                    'frame_shape': (h, w),
+                    'detections': det_result,
                 })
                 
                 # 통계 업데이트
@@ -296,7 +299,8 @@ class AsyncEngine:
             'tracking_count': 0,
             'plan_coords': [],
             'tracklets': [],
-            'projected': []
+            'projected': [],
+            'frame_shape': None,
         }
 
     def _print_results(self, result: Dict[str, Any]):
