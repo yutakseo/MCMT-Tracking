@@ -28,22 +28,15 @@ class VehicleDetector(DetectorBase):
 
     # 관심 클래스만 COCO ID로 매핑 (예시)
     DEFAULT_ID2COCO: Dict[int, int] = {
-        0 : 0,  #worker
-        1 : 0,  #worker_without_vest
-        2 : 0,  #signalman
-        3 : 0,  #signalman_with_baton_non_red
-        6 : 0,  #small_worker
-        7 : 0,  #small_worker_without_vest
-        8 : 0,  #small_signalman
-        9 : 0,  #small_signalman_with_baton_non_red
         15: 10,   # excavator
         16: 11,   # dump_truck
-        20: 12,   # forklift
-        21: 13,   # mixer_truck
-        23: 14,   # scissor_lift
-        22: 16,   # dozer
-        19: 17,   # cargo_truck
-        17: 18,   # crane_mobile
+        17: 12,   # crane_mobile
+        18: 13,   # tower_crane
+        19: 14,   # cargo_truck
+        20: 15,   # forklift
+        21: 16,   # mixer_truck
+        22: 17,   # dozer
+        23: 18,   # scissor_lift
         }
     """"""
     

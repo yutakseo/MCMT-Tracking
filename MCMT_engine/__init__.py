@@ -22,3 +22,8 @@ __all__ = [
     'PlanVisualizer',
     'GPUMonitor'
 ]
+
+class MCMT:
+    def __init__(self):
+        streamimg:bool
+        

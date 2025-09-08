@@ -12,7 +12,7 @@ import numpy as np
 class MatchConfig:
     # intra-round(동일 라운드) 카메라 간 클러스터링 게이트 (px, plan 좌표 기준)
     pair_gate: float = 120.0
-    # tracks(글로벌 트랙) ↔ 현재 라운드 클러스터 매칭 게이트
+    # tracks(글로벌 트랙) ↔ 현재 라운드 클러스터 매칭 게이트을 
     track_gate: float = 150.0
     # 트랙이 사라졌다가 몇 라운드까지 버틸지
     max_age: int = 10

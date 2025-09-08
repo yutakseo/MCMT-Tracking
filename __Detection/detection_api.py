@@ -8,13 +8,15 @@ from __Detection.ensemble_detection.engine.base import EnsembleDetector
 
 DEFAULT_CLASS_MAP: Dict[int, str] = {
     0:  "worker",
-    10: "excavator",
-    11: "dump_truck",
-    12: "forklift",
-    13: "mixer_truck",
-    14: "scissor_lift",
-    15: "dozer",
-    16: "cargo_truck",
+    10:   "excavator",
+    11:   "dump_truck",
+    12:   "crane_mobile",
+    13:   "tower_crane",
+    14:   "cargo_truck",
+    15:   "forklift",
+    16:    "mixer_truck",
+    17:   "dozer",
+    18:   "scissor_lift"
 }
 
 class DetectionAPI:
