@@ -1,6 +1,5 @@
-# /workspace/__Detection/detection_api.py
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
@@ -33,7 +32,8 @@ class DetectionAPI:
         models: Optional[List[str]] = None,        # ["vehicle","worker"]
         exclude: Optional[List[str]] = None,       # ["deprecated_model"]
         device_map: Optional[Dict[str, str]] = None,  # {"vehicle":"cuda:0","worker":"cuda:1"}
-        class_names: Optional[List[str]] = DEFAULT_CLASS_MAP,   # ["Person","Bicycle",...], None이면 coco2name 사용
+        # ✅ dict/list 모두 지원, 기본은 DEFAULT_CLASS_MAP
+        class_names: Optional[Union[List[str], Dict[int, str]]] = DEFAULT_CLASS_MAP,
         use_async: bool = True,
         max_workers: Optional[int] = None,
     ):
@@ -51,10 +51,12 @@ class DetectionAPI:
     # ----------------------------
     # 내부: 클래스 맵 초기화
     # ----------------------------
-    def _init_class_map(self, class_names: Optional[List[str]]) -> Dict[int, str]:
-        """사용자 정의 class_names가 있으면 인덱스 기반 맵 생성"""
-        if class_names:
-            return {i: name for i, name in enumerate(class_names)}
+    def _init_class_map(self, class_names: Optional[Union[List[str], Dict[int, str]]]) -> Dict[int, str]:
+        """사용자 정의 class_names가 있으면 맵 생성 (dict/list 모두 지원)"""
+        if isinstance(class_names, dict):
+            return {int(k): str(v) for k, v in class_names.items()}
+        if isinstance(class_names, (list, tuple)):
+            return {i: str(name) for i, name in enumerate(class_names)}
         return {}
 
     # ----------------------------
@@ -65,9 +67,8 @@ class DetectionAPI:
             return torch.zeros((0, 6), dtype=torch.float32, device=self.device)
 
         dets: List[List[float]] = []
-        append = dets.append  # 미세 최적화
+        append = dets.append
         for r in results:
-            # 필수 키 검사
             bbox = r.get("bbox", None)
             score = r.get("score", None)
             cid = r.get("class_id", None)
@@ -79,7 +80,6 @@ class DetectionAPI:
         if not dets:
             return torch.zeros((0, 6), dtype=torch.float32, device=self.device)
 
-        # target device로 바로 생성 (불필요한 .to() 방지)
         return torch.tensor(dets, dtype=torch.float32, device=self.device)
 
     # ----------------------------
@@ -98,12 +98,6 @@ class DetectionAPI:
     # 유틸: 이미지 크기
     # ----------------------------
     def imgInfo(self, image: np.ndarray) -> Tuple[int, int]:
-        """
-        Args:
-            image: numpy.ndarray (HxWxC, BGR)
-        Returns:
-            (height, width)
-        """
         if image is None:
             raise ValueError("Invalid image (None).")
         return image.shape[:2]
@@ -112,15 +106,8 @@ class DetectionAPI:
     # 추론: 단일 프레임
     # ----------------------------
     def detect(self, image: np.ndarray) -> torch.Tensor:
-        """
-        Args:
-            image: numpy.ndarray (HxWx3, BGR)
-        Returns:
-            torch.Tensor, shape (N,6) [x1,y1,x2,y2,score,class_id]
-        """
         if not isinstance(image, np.ndarray):
             raise TypeError("image must be a numpy.ndarray (BGR).")
-
         results = self.detector.detect(image)  # list of dicts(표준 스키마)
         return self._results_to_tensor(results)
 
@@ -128,20 +115,9 @@ class DetectionAPI:
     # 추론: 배치 (프레임 리스트)
     # ----------------------------
     def detect_batch(self, images: List[np.ndarray]) -> List[torch.Tensor]:
-        """
-        Args:
-            images: List[np.ndarray(BGR)]
-        Returns:
-            List[Tensor (N,6) on self.device]  # 프레임별 한 개의 텐서
-        Note:
-            - EnsembleDetector.detect_batch(images) 사용
-            - 엔진이 배치를 미구현했으면 내부에서 per-frame detect로 폴백됨
-        """
         if not isinstance(images, list) or not images:
             return []
-        # 엔진에서 프레임별 list[dict]를 프레임 순서대로 반환
         per_frame_results: List[List[Dict[str, Any]]] = self.detector.detect_batch(images)
-        # 즉시 Tensor로 표준화해서 메모리 피크를 낮춤
         return [self._results_to_tensor(res) for res in per_frame_results]
 
     # ----------------------------
@@ -171,4 +147,5 @@ class DetectionAPI:
         merged: Dict[int, str] = {}
         for det in getattr(self.detector, "detectors", []):
             merged.update(getattr(det, "coco2name", {}))
-        return merged
+        # 키/값 정규화
+        return {int(k): str(v) for k, v in merged.items()}

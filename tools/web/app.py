@@ -1,10 +1,10 @@
-# /workspace/tools/web/app.py
 """
 멀티카메라 웹 애플리케이션
 - 추적 시스템과 웹 서버 연동
 - 추론 루프 실행
 - 오버레이 데이터 생성
 """
+
 import logging
 import time
 import asyncio
@@ -13,41 +13,47 @@ from typing import List, Optional, Dict, Any
 
 sys.path.append("/workspace")
 
-# MCMT는 지연 임포트로 처리 (순환 임포트 방지)
+from MCMT import create_tracking_system, MultiCameraTrackingSystem
 from .manager import WebServerManager
 from .server import set_webviz, set_cam_streams, set_cam_overlays, set_class_map
 
+
 class MultiCameraWebApp:
     """멀티카메라 웹 애플리케이션"""
+
     def __init__(self, detector_models: Optional[List[str]] = None):
-        # 지연 임포트로 순환 임포트 방지
-        from MCMT import MultiCameraTrackingSystem
         self.tracking_system: Optional[MultiCameraTrackingSystem] = None
         self.web_manager = WebServerManager()
         self.detector_models = detector_models
 
     async def run(self):
         print("🚀 멀티카메라 추적 웹 시스템 시작")
+
         try:
+            # 1단계: 추적 시스템 초기화
             print("\n=== 1단계: 추적 시스템 초기화 ===")
             if self.detector_models:
                 print(f"🎯 사용할 탐지 모델: {self.detector_models}")
-            # 지연 임포트로 순환 임포트 방지
-            from MCMT import create_tracking_system
             self.tracking_system = create_tracking_system(detector_models=self.detector_models)
             print("✅ 추적 시스템 초기화 완료")
 
+            # 2단계: 웹 서버 시작
             print("\n=== 2단계: 웹 서버 시작 ===")
             if self.web_manager.start_web_server():
                 if getattr(self.tracking_system, "viz", None):
                     set_webviz(self.tracking_system.viz)
                 if getattr(self.tracking_system, "streams", None):
                     set_cam_streams(self.tracking_system.streams)
+
+                # DetectionAPI의 class_map을 웹에 1회 주입
                 self._inject_class_map()
+
+                # 브라우저 자동 열기
                 self.web_manager.open_browser()
             else:
                 print("❌ 웹 서버 시작 실패 - 웹 인터페이스 비활성화")
 
+            # 3단계: 추론 엔진 실행
             print("\n=== 3단계: 추론 엔진 실행 ===")
             await self._run_inference_loop()
 
@@ -59,9 +65,14 @@ class MultiCameraWebApp:
             self.cleanup()
 
     def _inject_class_map(self):
+        """
+        DetectionAPI(또는 동등 객체)의 name_map()을 찾아 tools.web에 주입.
+        트리: tracking_system, engine, core, detector 등 다양한 곳을 안전 탐색.
+        """
         ts = self.tracking_system
         if ts is None:
             return
+
         candidates = []
         for attr in ("detector", "detection_api"):
             candidates.append(getattr(ts, attr, None))
@@ -72,20 +83,33 @@ class MultiCameraWebApp:
             core = getattr(eng, "core", None)
             if core is not None:
                 candidates.append(getattr(core, "detector", None))
+
         seen = set()
+        cmap = {}
         for obj in candidates:
             if obj is None or id(obj) in seen:
                 continue
             seen.add(id(obj))
             if hasattr(obj, "name_map"):
                 try:
-                    cmap = obj.name_map()
-                    if isinstance(cmap, dict) and cmap:
-                        set_class_map(cmap)
-                        print(f"✅ class_map injected into web ({len(cmap)} classes)")
-                        return
+                    maybe = obj.name_map()
+                    if isinstance(maybe, dict) and maybe:
+                        cmap = {int(k): str(v) for k, v in maybe.items()}
+                        break
                 except Exception as e:
                     print(f"[WARN] name_map() fetch failed: {e}")
+
+        # ✅ 빈 맵이면 기본 맵으로 폴백
+        if not cmap:
+            try:
+                from __Detection.detection_api import DEFAULT_CLASS_MAP
+                cmap = {int(k): str(v) for k, v in DEFAULT_CLASS_MAP.items()}
+                print(f"[WARN] class_map not found from engine → fallback to DEFAULT_CLASS_MAP ({len(cmap)} classes)")
+            except Exception:
+                cmap = {}
+
+        set_class_map(cmap)
+        print(f"✅ class_map injected into web ({len(cmap)} classes)")
 
     async def _run_inference_loop(self):
         if not self.tracking_system or not self.tracking_system.engine:
@@ -125,6 +149,7 @@ class MultiCameraWebApp:
                     print(f"[DEBUG] 추론 결과 수신: round={result.get('round', -1)}, cameras={len(result.get('cameras', []))}")
                     print(f"[DEBUG] result keys: {list(result.keys())}")
 
+                    # 오버레이 데이터 생성 및 전달
                     print(f"[DEBUG] _create_overlays 호출 시작...")
                     overlays = self._create_overlays(result)
                     print(f"[DEBUG] _create_overlays 완료: {len(overlays)} 카메라")
@@ -132,6 +157,7 @@ class MultiCameraWebApp:
                     set_cam_overlays(overlays)
                     print(f"[DEBUG] set_cam_overlays 완료")
 
+                    # 좌표 취합
                     all_coords: List[Any] = []
                     coords_per_cam: List[List[Any]] = []
                     for cam in result.get("cameras", []):
@@ -139,6 +165,7 @@ class MultiCameraWebApp:
                         all_coords.extend(pts)
                         coords_per_cam.append(pts)
 
+                    # 웹 시각화 업데이트
                     if getattr(self.tracking_system, "viz", None):
                         try:
                             self.tracking_system.viz.update({
@@ -208,10 +235,11 @@ class MultiCameraWebApp:
             if (w > 0 and h > 0) and not (b[2] > b[0] and b[3] > b[1]):
                 return float(x), float(y), float(x + w), float(y + h)
             else:
-                return float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                return float(b[0]), float(b[1]), float(b[2]), float(b[3]]
 
         for idx, cam in enumerate(result.get("cameras") or []):
             items: List[Dict[str, Any]] = []
+
             cam_name = stream_names[idx] if idx < len(stream_names) else f"cam{idx+1}"
             print(f"[DEBUG] {cam_name}: 카메라 처리 시작")
 
@@ -221,7 +249,6 @@ class MultiCameraWebApp:
                 fh, fw = int(shape[0]), int(shape[1])
             print(f"[DEBUG] {cam_name}: frame_shape={shape}")
 
-            # Tracklets: list[dict]
             tracklets_raw = cam.get("tracklets", None)
             if isinstance(tracklets_raw, list):
                 print(f"[DEBUG] {cam_name}: {len(tracklets_raw)} tracklets, {cam.get('detection_count', '?')} detections")
@@ -249,7 +276,6 @@ class MultiCameraWebApp:
             elif tracklets_raw is not None:
                 print(f"[DEBUG] {cam_name}: tracklets 타입 비정상 -> {type(tracklets_raw)} (무시)")
 
-            # Detections fallback
             if not items:
                 det_raw = cam.get("detections", None)
                 print(f"[DEBUG] {cam_name}: tracklets 없음 → detections 사용 시도, 타입={type(det_raw)}")
@@ -281,7 +307,6 @@ class MultiCameraWebApp:
                                 print(f"[DEBUG] {cam_name}: detection(np) {i} error: {e}")
                     else:
                         print(f"[DEBUG] {cam_name}: det_arr shape 불가: {getattr(det_arr, 'shape', None)}")
-
                 elif isinstance(det_raw, list) and det_raw:
                     all_dicts = all(isinstance(x, dict) for x in det_raw)
                     if all_dicts:

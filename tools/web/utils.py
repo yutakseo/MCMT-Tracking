@@ -1,4 +1,3 @@
-# /workspace/tools/web/utils.py
 """
 웹 관련 유틸리티 함수들
 - 오버레이 관리
@@ -52,18 +51,42 @@ class WebOverlayManager:
         return (h & 255, (h >> 8) & 255, (h >> 16) & 255)
 
     def _resolve_label(self, item: Dict[str, Any]) -> str:
+        """
+        라벨 해석 우선순위:
+          1) item['label']이 'unknown/obj'가 아니고 **숫자 문자열이 아니면** 사용
+          2) class_id가 있고 _class_map에 있으면 사용
+          3) class_id만 있으면 'class_{id}'
+          4) 기본 'obj'
+        """
         label = item.get("label")
         cid = item.get("class_id", None)
-        if isinstance(label, str) and label.strip() and label.lower() not in ["unknown", "obj"]:
-            if isinstance(cid, (int, np.integer)) and int(cid) >= 0:
-                return f"{label}({int(cid)})"
-            return label
+
+        # 1) 명시 라벨이 있고 'unknown/obj'가 아니며 숫자형이 아닐 때만 사용
+        if isinstance(label, str):
+            lab = label.strip()
+            if lab and lab.lower() not in ["unknown", "obj"]:
+                # 숫자 문자열(예: "0", "10")은 무시 → class_map 우선
+                is_numeric_like = lab.isdigit()
+                if not is_numeric_like:
+                    try:
+                        float(lab)
+                        is_numeric_like = True
+                    except Exception:
+                        pass
+                if not is_numeric_like:
+                    if isinstance(cid, (int, np.integer)) and int(cid) >= 0:
+                        return f"{lab}({int(cid)})"
+                    return lab
+
+        # 2) class_id → class_map
         if isinstance(cid, (int, np.integer)):
             cid_int = int(cid)
             if cid_int >= 0 and cid_int in self._class_map:
                 return f"{self._class_map[cid_int]}({cid_int})"
             elif cid_int >= 0:
                 return f"class_{cid_int}"
+
+        # 3) 기본
         return "obj"
 
     def _norm_bbox_to_xyxy(self, bbox, img_w, img_h, it) -> Optional[tuple]:
