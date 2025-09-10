@@ -1,4 +1,4 @@
-# /workspace/MCMT_engine/scst_camera.py
+# /workspace/MCMT_engine/streaming/video_SCST.py
 from __future__ import annotations
 import os, cv2, numpy as np
 from typing import List, Dict, Any, Optional, Iterable, Tuple
@@ -31,7 +31,7 @@ class videoSCST:
     """
     def __init__(
         self,
-        # --- 필수: 도면 정보 ---
+        # --- 기본 도면 정보(디폴트) ---
         plan_img_path: str,
         plan_pts: List[Tuple[float, float]],
 
@@ -55,11 +55,20 @@ class videoSCST:
         plan_point_radius: int = 10,
         ransac_thresh: float = 3.0,
     ):
-        # 도면 정보 저장
+        # 디폴트 도면 정보
         self.plan_img_path = plan_img_path
         self.plan_pts = plan_pts
         self.ransac_thresh = ransac_thresh
-        
+
+        # projector 재생성 시 필요한 옵션들 캐시
+        self._proj_opts = dict(
+            trail_len=plan_trail_len,
+            trail_ttl=plan_trail_ttl,
+            line_thickness=plan_line_thickness,
+            point_radius=plan_point_radius,
+        )
+        self._plan_img_cached_path = plan_img_path
+
         # args
         self.args = args if args is not None else Args()
         self.cpu_workers = int(getattr(self.args, "cpu_workers", 8))
@@ -82,14 +91,13 @@ class videoSCST:
         self.core = TrackerCore(self.args, self.detector)
         self.visualizer = TrackerVisualizer()
 
-        # Projector & Homography (도면 정보만 초기화, 켈리브레이션은 별도 함수에서)
-        self.projector = PlanProjector(
-            plan_img_or_path=plan_img_path,
-            trail_len=plan_trail_len,
-            trail_ttl=plan_trail_ttl,
-            line_thickness=plan_line_thickness,
-            point_radius=plan_point_radius,
-        )
+        # Projector (도면 이미지 로드 1회)
+        self.projector = PlanProjector(plan_img_or_path=plan_img_path, **self._proj_opts)
+
+        # 최근 캘리브레이션 상태(로그/디버깅용)
+        self._last_cctv_pts: Optional[List[Tuple[float, float]]] = None
+        self._last_plan_pts: Optional[List[Tuple[float, float]]] = None
+        self._last_H: Optional[np.ndarray] = None
 
     # ─────────────────────────────────────────────────────────
     # 내부: 병렬 디코딩 out-of-order → in-order 보정
@@ -113,55 +121,97 @@ class videoSCST:
         buffer.clear()
 
     # ─────────────────────────────────────────────────────────
-    # 핵심 API: 켈리브레이션 + 비디오 → 추적/저장 + 도면(미니맵) 저장 (한 큐에 처리)
+    # 새 도면 이미지/포인트 설정 (인스턴스 재사용 시)
+    # ─────────────────────────────────────────────────────────
+    def set_plan(
+        self,
+        plan_img_path: Optional[str] = None,
+        plan_pts: Optional[List[Tuple[float, float]]] = None,
+    ):
+        """도면 이미지/포인트 갱신. 이미지 바뀌면 Projector만 새로 만듦(Detector/Tracker 재사용)."""
+        if plan_pts is not None:
+            self.plan_pts = plan_pts
+
+        if plan_img_path and (plan_img_path != self._plan_img_cached_path):
+            # Projector만 교체 (가벼움)
+            self.projector = PlanProjector(plan_img_or_path=plan_img_path, **self._proj_opts)
+            self.plan_img_path = plan_img_path
+            self._plan_img_cached_path = plan_img_path
+
+    # ─────────────────────────────────────────────────────────
+    # 캘리브레이션 전용 API (H만 다시 맞추고 싶을 때)
+    # ─────────────────────────────────────────────────────────
+    def calibrate(
+        self,
+        cctv_pts: List[Tuple[float, float]],
+        plan_pts: Optional[List[Tuple[float, float]]] = None,
+        ransac_thresh: Optional[float] = None,
+        plan_img_path: Optional[str] = None,
+    ) -> np.ndarray:
+        """호모그래피 H만 재추정(인스턴스/검출기 재생성 없이)."""
+        if plan_img_path or plan_pts is not None:
+            self.set_plan(plan_img_path=plan_img_path, plan_pts=plan_pts)
+
+        if ransac_thresh is None:
+            ransac_thresh = self.ransac_thresh
+
+        H, _ = self.projector.fit_homography(cctv_pts, self.plan_pts, ransac_thresh=ransac_thresh)
+
+        # 상태 기록
+        self._last_cctv_pts = list(cctv_pts)
+        self._last_plan_pts = list(self.plan_pts)
+        self._last_H = H
+        return H
+
+    # ─────────────────────────────────────────────────────────
+    # 핵심 API: (옵션) 켈리브레이션 override + 추적/저장
     # ─────────────────────────────────────────────────────────
     def track_and_save(
         self,
         video_path: str,
-        cctv_pts: List[Tuple[float, float]],  # CCTV 영상 내 기준점 좌표 리스트
-        camera_save_path: Optional[str] = None,  # 카메라 영상 결과 저장 경로 (None이면 저장 안 함)
-        plan_save_path: Optional[str] = None,    # 도면(미니맵) 결과 저장 경로 (None이면 저장 안 함)
+        cctv_pts: List[Tuple[float, float]],
+
+        # ⬇️ 호출마다 덮어쓰기(override) 가능
+        plan_pts: Optional[List[Tuple[float, float]]] = None,
+        plan_img_path: Optional[str] = None,
+
+        camera_save_path: Optional[str] = None,  # 카메라 영상 결과 저장
+        plan_save_path: Optional[str] = None,    # 도면(미니맵) 결과 저장
         plan_mode: str = "bottom-center",
-        cam_trail_len: int = 30,                 # 카메라 영상에 그릴 궤적 길이
-        ransac_thresh: Optional[float] = None,   # RANSAC 임계값 (None이면 생성자에서 설정한 값 사용)
+        cam_trail_len: int = 30,
+        ransac_thresh: Optional[float] = None,
     ) -> List[List[Dict[str, Any]]]:
         """
-        켈리브레이션 + 비디오 처리 및 추적 수행 (한 큐에 처리)
-        
-        Args:
-            video_path: 처리할 비디오 파일 경로
-            cctv_pts: CCTV 영상 내 기준점 좌표 리스트
-            camera_save_path: 카메라 영상 결과 저장 경로
-            plan_save_path: 도면(미니맵) 결과 저장 경로
-            plan_mode: 도면 렌더링 모드
-            cam_trail_len: 카메라 영상에 그릴 궤적 길이
-            ransac_thresh: RANSAC 임계값
-            
-        Returns:
-            List[List[Dict[str, Any]]]: 추적 결과
+        캘리브레이션(호출 시 지정 가능) + 비디오 처리 및 추적 수행
+        - plan_pts / plan_img_path 를 넘기면 인스턴스 기본값을 덮어써서 사용
         """
-        # 1. 켈리브레이션 수행
-        if ransac_thresh is None:
-            ransac_thresh = self.ransac_thresh
-            
-        try:
-            H, _ = self.projector.fit_homography(cctv_pts, self.plan_pts, ransac_thresh=ransac_thresh)
-            print(f"[INFO] Camera calibration completed successfully")
-        except Exception as e:
-            print(f"[ERROR] Camera calibration failed: {e}")
-            raise RuntimeError(f"Camera calibration failed: {e}")
-        
-        # 2. 비디오 파일 확인
+        # 0) 입력 검증
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video path does not exist: {video_path}")
 
-        # 3. 비디오별 상태 초기화
+        # 1) (선택) 도면/포인트 override 반영
+        self.set_plan(plan_img_path=plan_img_path, plan_pts=plan_pts)
+
+        # 2) H 추정 (매 호출마다 다른 매핑으로)
+        if ransac_thresh is None:
+            ransac_thresh = self.ransac_thresh
+        try:
+            H, _ = self.projector.fit_homography(cctv_pts, self.plan_pts, ransac_thresh=ransac_thresh)
+            self._last_cctv_pts = list(cctv_pts)
+            self._last_plan_pts = list(self.plan_pts)
+            self._last_H = H
+            print(f"[INFO] Camera calibration completed (points={len(cctv_pts)} -> {len(self.plan_pts)})")
+        except Exception as e:
+            print(f"[ERROR] Camera calibration failed: {e}")
+            raise RuntimeError(f"Camera calibration failed: {e}")
+
+        # 3) 추적기 초기화
         self.core.reset_tracker()
         self.core.img_size = None
         self.visualizer.reset()
         results: List[List[Dict[str, Any]]] = []
 
-        # 4. 카메라 뷰 저장 준비 (선택)
+        # 4) 카메라 뷰 저장 준비 (선택)
         writer = None
         fps = 30.0
         if camera_save_path:
@@ -180,7 +230,7 @@ class videoSCST:
             cap.release()
             writer, camera_save_path = self._create_writer(camera_save_path, fps, width, height)
 
-        # 5. 병렬 디코딩 → 순서 보정 → 배치 처리
+        # 5) 병렬 디코딩 → 순서 보정 → 배치 처리
         raw_stream = iter_frames_parallel(video_path, cpu_workers=self.cpu_workers, chunk_sec=self.chunk_sec)
         stream = self._ordered_stream(raw_stream)
 
@@ -195,10 +245,7 @@ class videoSCST:
                     batch_raw.append(frame)
 
                 if len(batch_frames) >= self.batch_size:
-                    # 6. 객체 탐지 + 추적
                     batch_res = self.core.track_video_batch(batch_frames)
-                    
-                    # 7. 카메라 영상 저장 (선택)
                     if writer is not None:
                         for f, r in zip(batch_raw, batch_res):
                             vis = self.visualizer.draw_frame(f, r, trail_len=int(min(cam_trail_len, 1000)))
@@ -226,7 +273,7 @@ class videoSCST:
         if writer is not None:
             print(f"[INFO] Camera view saved: {camera_save_path}, frames: {frame_count}")
 
-        # 8. 도면(미니맵) 저장 (선택) - 호모그래피 적용
+        # 6) 도면(미니맵) 저장 (선택) - 현재 projector 상태(H 포함)를 사용
         if plan_save_path:
             self.projector.save_video(results, plan_save_path, fps=float(fps), mode=plan_mode)
             print(f"[INFO] Plan projection saved: {plan_save_path}")
@@ -249,29 +296,22 @@ class videoSCST:
         return writer, save_path
 
     # ─────────────────────────────────────────────────────────
-    # 선택: H 갱신
+    # 호모그래피 재계산 (호출 시 플랜/스레숄드 변경 가능)
     # ─────────────────────────────────────────────────────────
     def refit_homography(
         self,
         cctv_pts: List[Tuple[float, float]],
         plan_pts: Optional[List[Tuple[float, float]]] = None,
         ransac_thresh: Optional[float] = None,
+        plan_img_path: Optional[str] = None,
     ):
-        """
-        호모그래피 재계산
-        
-        Args:
-            cctv_pts: CCTV 영상 내 기준점 좌표 리스트
-            plan_pts: 도면 내 기준점 좌표 리스트 (None이면 기존 값 사용)
-            ransac_thresh: RANSAC 임계값 (None이면 기존 값 사용)
-        """
-        if plan_pts is not None:
-            self.plan_pts = plan_pts
-        if ransac_thresh is not None:
-            self.ransac_thresh = ransac_thresh
-            
-        self.cctv_pts = cctv_pts
-        self.H, _ = self.projector.fit_homography(self.cctv_pts, self.plan_pts, ransac_thresh=self.ransac_thresh)
+        """인스턴스 유지한 채로 H만 갱신하고 싶을 때 사용."""
+        self.calibrate(
+            cctv_pts=cctv_pts,
+            plan_pts=plan_pts,
+            ransac_thresh=ransac_thresh,
+            plan_img_path=plan_img_path,
+        )
 
     # ─────────────────────────────────────────────────────────
     # 정리(선택)
