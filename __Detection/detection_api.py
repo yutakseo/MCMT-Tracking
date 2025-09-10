@@ -107,6 +107,14 @@ class DetectionAPI:
     # ----------------------------
     # 추론: 단일 프레임
     # ----------------------------
+        """
+        출력값 :
+        [x1, y1, x2, y2, score, class_id]
+        tensor([
+        [ 120.0,  250.0,  300.0,  480.0, 0.92,  0.0 ],   # worker
+        [ 420.0,  200.0,  640.0,  400.0, 0.87, 11.0 ],   # dump_truck
+        ], device='cuda:0')
+        """
     def detect(self, image: np.ndarray) -> torch.Tensor:
         if not isinstance(image, np.ndarray):
             raise TypeError("image must be a numpy.ndarray (BGR).")

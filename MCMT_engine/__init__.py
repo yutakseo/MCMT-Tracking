@@ -10,8 +10,8 @@
 """
 
 from .core.async_inference import AsyncEngine
-from .streaming.stream_SCST import streamSCST, SCST
-from .streaming.cam_stream import CamMJPEG
+from .SCST.stream_SCST import streamSCST, SCST
+from .SCST.cam_stream import CamMJPEG
 from .visualization.visualizer import PlanVisualizer
 from .monitoring.gpu_monitor import GPUMonitor
 

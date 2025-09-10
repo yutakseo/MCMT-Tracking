@@ -1,7 +1,7 @@
 # /workspace/__Tracking/tracking_api.py
 import cv2, os, gc
 import numpy as np
-from typing import List, Dict, Any, Iterable, Tuple
+from typing import List, Dict, Any, Iterable, Tuple, Optional, Mapping
 from __Tracking.utils.video_decoder import iter_frames_parallel
 from __Tracking.core.tracker_core import TrackerCore
 from __Tracking.utils.visualizer import TrackerVisualizer
@@ -44,8 +44,8 @@ class TrackerAPI:
         여기서 전역 프레임 인덱스 기준으로 재정렬해 순차적으로 yield.
         메모리 안전장치: 버퍼가 너무 커지면(희소하게 들어오는 경우) 낮은 인덱스부터 부분 flush.
         """
-        buffer = {}          # idx -> frame
-        expected = None      # 다음에 내보낼 전역 인덱스
+        buffer: Dict[int, np.ndarray] = {}
+        expected: Optional[int] = None
         for idx, frame in frame_stream:
             if frame is None or frame.size == 0:
                 continue
@@ -61,10 +61,8 @@ class TrackerAPI:
 
             # 메모리 안전장치: 버퍼가 너무 커지면 낮은 인덱스부터 부분 flush
             if len(buffer) > self._max_reorder_buffer:
-                # 가장 낮은 쪽부터 expected에 가까운 순서로 정렬하여 일부 방출
                 keys_sorted = sorted(buffer.keys())
-                # expected보다 앞선(지나간) 프레임은 없겠지만 혹시 모를 이상치 제거
-                flush_keys = [k for k in keys_sorted if k < expected]
+                flush_keys = [k for k in keys_sorted if expected is not None and k < expected]
                 for k in flush_keys:
                     f = buffer.pop(k, None)
                     if f is not None:
@@ -78,11 +76,19 @@ class TrackerAPI:
         buffer.clear()
         gc.collect()
 
+    @staticmethod
+    def _pack_results(results: List[List[Dict[str, Any]]]) -> Dict[int, List[Dict[str, Any]]]:
+        """
+        리스트 형태의 프레임 결과를 프레임 인덱스 → 결과 리스트 dict로 포장.
+        예: {0: [...], 1: [...], ...}
+        """
+        return {i: frame_res for i, frame_res in enumerate(results)}
+
     # ----------------------------
     # 내부: 비디오 전체 추적 (저장 X)  → 배치 추론 적용
     # ----------------------------
-    def _track_video(self, video_path: str) -> List[List[Dict[str, Any]]]:
-        """비디오 읽어서 추적 결과만 리스트로 반환 (배치 추론/병렬 디코딩 + 순서 재정렬)"""
+    def _track_video(self, video_path: str) -> Dict[int, List[Dict[str, Any]]]:
+        """비디오 읽어서 추적 결과를 프레임 번호 매핑(dict)로 반환"""
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video path does not exist: {video_path}")
 
@@ -120,11 +126,19 @@ class TrackerAPI:
         if not self.results:
             raise RuntimeError(f"No frames were processed from: {video_path}")
 
-        return self.results
+        return self._pack_results(self.results)
 
     # ----------------------------
     # 단일 프레임 추적 (스트리밍 입력용)
     # ----------------------------
+    """
+    결과값 예시(frame 단일):
+    frame_res = [
+        {"id": 7,  "bbox": [120.0, 250.0, 300.0, 480.0], "score": 0.92, "class_id": 0,  "label": "worker"},
+        {"id": 21, "bbox": [420.0, 200.0, 640.0, 400.0], "score": 0.87, "class_id": 11, "label": "dump_truck"}
+    ]
+    visualize=True인 경우: (frame_res, vis_img_ndarray)
+    """
     def track_image(self, frame: np.ndarray, visualize: bool = False, trail_len: int = 30):
         if frame is None or not isinstance(frame, np.ndarray):
             raise TypeError("Input frame must be a valid numpy.ndarray")
@@ -143,8 +157,8 @@ class TrackerAPI:
     # ----------------------------
     # 비디오 파일 추적 + 결과 저장 (병렬 디코딩 + 배치 추론으로 한 번 읽기)
     # ----------------------------
-    def track_video(self, video_path: str, save_path: str, trail_len: int = 30) -> List[List[Dict[str, Any]]]:
-        """비디오 한 번만 읽어서(병렬 디코딩) 배치 추적 + 시각화 저장 (전역 프레임 순서 보장)"""
+    def track_video(self, video_path: str, save_path: str, trail_len: int = 30) -> Dict[int, List[Dict[str, Any]]]:
+        """비디오 한 번만 읽어서(병렬 디코딩) 배치 추적 + 시각화 저장 → 프레임 번호 매핑 반환"""
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video path does not exist: {video_path}")
 
@@ -200,9 +214,7 @@ class TrackerAPI:
                         writer.write(vis)
                         self.results.append(r)
                         frame_count += 1
-                        # 프레임/시각화 이미지 참조 해제
                         del vis
-                    # 배치 버퍼 비우기 + 가비지 컬렉션
                     batch_frames.clear()
                     batch_raw.clear()
                     del batch_res
@@ -227,7 +239,11 @@ class TrackerAPI:
             writer.release()
 
         print(f"[INFO] Tracking video saved: {save_path}, frames written: {frame_count}")
-        return self.results
+
+        if not self.results:
+            raise RuntimeError(f"No frames were processed from: {video_path}")
+
+        return self._pack_results(self.results)
 
     # ----------------------------
     # 내부: VideoWriter 생성

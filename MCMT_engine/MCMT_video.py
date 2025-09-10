@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import sys
 sys.path.append("/workspace")  # 프로젝트 루트 보장
 
-from MCMT_engine.streaming.video_SCST import videoSCST, Args
-from tools.homo_graphy import PlanProjector
+from MCMT_engine.SCST.video_SCST import videoSCST, Args
+from MCMT_engine.core.homoGraphy import PlanProjector
 
 
 # ───────────────────────────────────────────────────────────────────────────────

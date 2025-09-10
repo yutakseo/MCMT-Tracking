@@ -8,7 +8,7 @@ import logging
 import torch
 from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
-from ..streaming.stream_SCST import streamSCST
+from ..SCST.stream_SCST import streamSCST
 from ..monitoring.gpu_monitor import GPUMonitor
 
 
