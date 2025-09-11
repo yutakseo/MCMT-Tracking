@@ -90,6 +90,69 @@ class TrackerAPI:
     def _pack_results(results: List[List[Dict[str, Any]]]) -> Dict[int, List[Dict[str, Any]]]:
         return {i: frame_res for i, frame_res in enumerate(results)}
 
+    # ────────────────────────────
+    # 내부 유틸: bbox 표준화(xyxy)
+    # ────────────────────────────
+    @staticmethod
+    def _xyxy_from_any(bbox: Any) -> np.ndarray:
+        """
+        bbox: [x1,y1,x2,y2] 또는 [x,y,w,h] 또는 (순서 뒤바뀐 좌표)
+        return: (4,) float32 xyxy
+        """
+        b = np.asarray(bbox, dtype=np.float32).reshape(-1)
+        if b.shape[0] < 4:
+            raise ValueError("bbox length must be >= 4")
+        x1, y1, a, b2 = b[0], b[1], b[2], b[3]
+        # 이미 xyxy
+        if a > x1 and b2 > y1:
+            return np.array([x1, y1, a, b2], dtype=np.float32)
+        # tlwh
+        if a > 0 and b2 > 0:
+            return np.array([x1, y1, x1 + a, y1 + b2], dtype=np.float32)
+        # 섞임 방지
+        x2, y2 = a, b2
+        return np.array([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], dtype=np.float32)
+
+    def _build_det_arrays(self, frame_res: List[Dict[str, Any]]) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[List[str]]]:
+        """
+        frame_res(list[dict]) -> boxes_xyxy(float32 Nx4), ids(Optional N,), classes(Optional list[str])
+        dict 스키마 예: {'bbox':..., 'id':..., 'label'/ 'class': ...}
+        """
+        if not frame_res:
+            return np.empty((0, 4), dtype=np.float32), None, None
+
+        boxes = []
+        ids: List[Optional[int]] = []
+        clss: List[Optional[str]] = []
+
+        append = boxes.append
+        for d in frame_res:
+            bbox = d.get("bbox", d.get("box", d.get("tlwh", None)))
+            if bbox is None:
+                continue
+            append(self._xyxy_from_any(bbox))
+            ids.append(int(d["id"]) if "id" in d and d["id"] is not None else None)
+            clss.append(d.get("label", d.get("class", None)))
+
+        if not boxes:
+            return np.empty((0, 4), dtype=np.float32), None, None
+
+        boxes_xyxy = np.vstack(boxes).astype(np.float32, copy=False)
+
+        # ids: Optional[np.ndarray] (정수/None 섞임을 허용 → object 배열 방지 위해 필터링)
+        if any(v is not None for v in ids):
+            ids_array = np.array([(-1 if v is None else int(v)) for v in ids], dtype=np.int32)
+        else:
+            ids_array = None
+
+        # classes: Optional[List[str]]
+        if any(v is not None for v in clss):
+            class_list = [("" if v is None else str(v)) for v in clss]
+        else:
+            class_list = None
+
+        return boxes_xyxy, ids_array, class_list
+
     # ----------------------------
     # 내부: 비디오 전체 추적 (저장 X)
     # ----------------------------
@@ -110,13 +173,15 @@ class TrackerAPI:
         stream = self.streamer(video_path)  # (idx, frame) iterator
 
         batch_frames: List[np.ndarray] = []
+        batch_fids: List[int] = []
         frame_in = 0
         print("[TrackerAPI] detect+track: start")
         t0_all = time.perf_counter()
         last_infer_t = time.perf_counter()
 
-        for _, frame in stream:
+        for fid, frame in stream:
             batch_frames.append(frame)
+            batch_fids.append(fid)
             now = time.perf_counter()
 
             do_flush = False
@@ -139,6 +204,7 @@ class TrackerAPI:
                           f"(batch={len(batch_frames)}, infer={(t1 - t0):.3f}s)")
 
                 batch_frames.clear()
+                batch_fids.clear()
                 del batch_res
                 gc.collect()
 
@@ -151,6 +217,7 @@ class TrackerAPI:
             print(f"[TrackerAPI] detect+track: processed {frame_in} frames "
                   f"(final, infer={(t1 - t0):.3f}s)")
             batch_frames.clear()
+            batch_fids.clear()
             del batch_res
             gc.collect()
 
@@ -181,9 +248,19 @@ class TrackerAPI:
         return frame_res
 
     # ----------------------------
-    # 비디오 파일 추적 + 저장
+    # 비디오 파일 추적 + 저장 (+ per-frame on_detection 콜백)
     # ----------------------------
-    def track_video(self, video_path: str, save_path: str, trail_len: int = 30) -> Dict[int, List[Dict[str, Any]]]:
+    def track_video(
+        self,
+        video_path: str,
+        save_path: Optional[str] = None,
+        trail_len: int = 30,
+        *,
+        on_detection: Optional[
+            # (frame_id, boxes_xyxy, ids, classes, meta) -> None
+            Callable[[int, np.ndarray, Optional[np.ndarray], Optional[List[str]], Optional[dict]], None]
+        ] = None,
+    ):
         print("TrackingAPI : tracking video")
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video path does not exist: {video_path}")
@@ -219,7 +296,7 @@ class TrackerAPI:
         writer, save_path = self._create_writer(save_path, fps, writer_w, writer_h)
         print(f"[TrackerAPI] encode(camera): writer ready path={save_path}, fps={fps:.2f}, size=({writer_w}x{writer_h})")
 
-        # 스트리밍 → 배치 추적 → 그리기 → 저장
+        # 스트리밍 → 배치 추적 → (옵션: on_detection) → 그리기 → 저장
         frame_count = 0
         print(f"[TrackerAPI] decode(streaming): start "
               f"(threads={self.decode_threads}, prefetch={self.prefetch_frames}, "
@@ -230,14 +307,16 @@ class TrackerAPI:
 
         batch_frames: List[np.ndarray] = []
         batch_raw: List[np.ndarray] = []
+        batch_fids: List[int] = []
         last_infer_t = time.perf_counter()
 
         try:
             print("[TrackerAPI] detect+track+encode(camera): start")
             t_proc0 = time.perf_counter()
-            for _, frame in stream:
+            for fid, frame in stream:
                 batch_frames.append(frame)
                 batch_raw.append(frame)
+                batch_fids.append(fid)
 
                 now = time.perf_counter()
                 do_flush = False
@@ -251,6 +330,14 @@ class TrackerAPI:
                     batch_res = self.core.track_video_batch(batch_frames)
                     t1 = time.perf_counter()
 
+                    # ── 프레임별 콜백: 디텍션/트래킹 결과가 나온 즉시 전달
+                    if on_detection is not None:
+                        for _fid, _res in zip(batch_fids, batch_res):
+                            boxes_xyxy, ids_array, class_list = self._build_det_arrays(_res)
+                            # meta는 필요 시 확장 (타임스탬프가 스트리머에서 오면 여기에 넣기)
+                            on_detection(_fid, boxes_xyxy, ids_array, class_list, None)
+
+                    # ── 카메라 비디오 시각화/저장
                     for f, r in zip(batch_raw, batch_res):
                         vis = self.visualizer.draw_frame(f, r, trail_len=int(min(trail_len, 1000)))
                         writer.write(vis)
@@ -265,6 +352,7 @@ class TrackerAPI:
                     last_infer_t = now
                     batch_frames.clear()
                     batch_raw.clear()
+                    batch_fids.clear()
                     del batch_res
                     gc.collect()
 
@@ -272,14 +360,22 @@ class TrackerAPI:
                 t0 = time.perf_counter()
                 batch_res = self.core.track_video_batch(batch_frames)
                 t1 = time.perf_counter()
+
+                if on_detection is not None:
+                    for _fid, _res in zip(batch_fids, batch_res):
+                        boxes_xyxy, ids_array, class_list = self._build_det_arrays(_res)
+                        on_detection(_fid, boxes_xyxy, ids_array, class_list, None)
+
                 for f, r in zip(batch_raw, batch_res):
                     vis = self.visualizer.draw_frame(f, r, trail_len=int(min(trail_len, 1000)))
                     writer.write(vis)
                     self.results.append(r)
                     frame_count += 1
                     del vis
+
                 batch_frames.clear()
                 batch_raw.clear()
+                batch_fids.clear()
                 del batch_res
                 gc.collect()
             t_proc1 = time.perf_counter()

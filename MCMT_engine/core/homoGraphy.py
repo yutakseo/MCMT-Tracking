@@ -94,6 +94,22 @@ class PlanProjector:
             raise RuntimeError("findHomography failed.")
         self.H = H
         return H, mask
+    
+    def projection_from_xyxy(self, boxes_xyxy: np.ndarray) -> np.ndarray:
+        """
+        Fast path: 이미 xyxy(float32, (N,4)) 박스 배열이 있을 때,
+        bottom-center만 추출해서 H로 투영해 (N,2) 도면 좌표를 반환.
+        """
+        if boxes_xyxy is None:
+            return np.empty((0, 2), dtype=np.float32)
+        boxes = np.asarray(boxes_xyxy, dtype=np.float32).reshape(-1, 4)
+        if boxes.size == 0:
+            return np.empty((0, 2), dtype=np.float32)
+        cx = (boxes[:, 0] + boxes[:, 2]) * 0.5
+        cy = boxes[:, 3]  # bottom y
+        pts = np.stack([cx, cy], axis=1)  # (N,2)
+        return self._project_points(self.H, pts)  # (N,2)
+
 
     # -------------------- Internals --------------------
     @staticmethod
