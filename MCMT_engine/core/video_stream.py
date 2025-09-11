@@ -37,62 +37,10 @@ def iter_frames_streaming(video_path: str, cfg: VideoStreamConfig) -> Iterable[T
     assert os.path.exists(video_path), f"Missing video: {video_path}"
     q: "queue.Queue[Tuple[int, Optional[np.ndarray]]]" = queue.Queue(maxsize=cfg.prefetch_frames)
 
-    def _worker_pyav():
-        nonlocal q
-        try:
-            # av.open 옵션 구성
-            open_opts = {}
-            if decode_threads is not None and decode_threads >= 0:
-                # '0'은 FFmpeg의 자동 결정(= 코덱 내부 스레드 최대 활용)
-                open_opts["threads"] = "0" if decode_threads == 0 else str(decode_threads)
-
-            # NVDEC 힌트 (가능할 때만)
-            if hwaccel == "cuda":
-                # hwaccel_device는 환경에 맞춰 GPU 인덱스 지정(여기선 0)
-                open_opts["hwaccel"] = "cuda"
-                open_opts["hwaccel_device"] = "0"
-                # 필요시 아래 옵션도 시도해볼 수 있음 (환경 따라 무시되기도 함)
-                # open_opts["hwaccel_output_format"] = "cuda"
-
-            print(f"{log_prefix} open(PyAV): threads={decode_threads}, hwaccel={hwaccel}")
-            container = av.open(video_path, mode="r", options=open_opts)
-
-            # 첫 번째 비디오 스트림 선택
-            stream = next(s for s in container.streams if s.type == "video")
-
-            # 코덱 내부 스레딩 힌트
-            try:
-                stream.thread_type = "AUTO"
-                if decode_threads and decode_threads > 0:
-                    stream.thread_count = int(decode_threads)
-            except Exception:
-                pass
-
-            idx = 0
-            for packet in container.demux(stream):
-                for frame in packet.decode():
-                    # 주의: 여기서 to_ndarray('bgr24')를 하면 CPU 메모리로 내려옵니다.
-                    # 그래도 "디코딩" 자체는 NVDEC이 처리하므로 CPU 부하는 줄고
-                    # nvidia-smi에서 decoder%가 올라갑니다.
-                    img = _bgr_from_avframe(frame)
-                    if target_size:
-                        w, h = target_size
-                        if img.shape[1] != w or img.shape[0] != h:
-                            img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-                    q.put((idx, img))
-                    idx += 1
-
-            container.close()
-        except Exception as e:
-            print(f"{log_prefix} PyAV error: {e}")
-        finally:
-            q.put((-1, None))  # sentinel
-
-
     def _worker_cv2():
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"{cfg.log_prefix} OpenCV cannot open: {video_path}")
+            print(f"{cfg.log_prefix} OpenCV cannot open: {video_path}", flush=True)
             q.put((-1, None))
             return
         try:
@@ -102,7 +50,7 @@ def iter_frames_streaming(video_path: str, cfg: VideoStreamConfig) -> Iterable[T
             pass
 
         idx = 0
-        print(f"{cfg.log_prefix} open(OpenCV): target_size={cfg.target_size}")
+        print(f"{cfg.log_prefix} open(OpenCV): target_size={cfg.target_size}", flush=True)
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -115,6 +63,73 @@ def iter_frames_streaming(video_path: str, cfg: VideoStreamConfig) -> Iterable[T
             idx += 1
         cap.release()
         q.put((-1, None))
+
+    def _worker_pyav():
+        # === 로컬 바인딩 (예외 시에도 안전) ===
+        log_prefix   = cfg.log_prefix or "[decoder]"
+        decode_threads = int(cfg.decode_threads or 0)  # 0=auto
+        hwaccel      = (cfg.hwaccel or "").lower() if cfg.hwaccel else None
+        target_size  = cfg.target_size
+
+        try:
+            # av.open 옵션 구성
+            open_opts = {}
+            # '0'은 FFmpeg의 자동 결정(= 코덱 내부 스레드 최대 활용)
+            open_opts["threads"] = "0" if decode_threads == 0 else str(max(0, decode_threads))
+
+            # NVDEC 힌트 (가능할 때만)
+            if hwaccel == "cuda":
+                # 환경에 따라 무시될 수 있음
+                open_opts["hwaccel"] = "cuda"
+                open_opts["hwaccel_device"] = "0"
+                # 필요 시:
+                # open_opts["hwaccel_output_format"] = "cuda"
+
+            print(f"{log_prefix} open(PyAV): threads={decode_threads}, hwaccel={hwaccel}", flush=True)
+            container = av.open(video_path, mode="r", options=open_opts)
+
+            # 첫 번째 비디오 스트림 선택
+            stream = None
+            for s in container.streams:
+                if getattr(s, "type", None) == "video":
+                    stream = s
+                    break
+            if stream is None:
+                raise RuntimeError("No video stream found")
+
+            # 코덱 내부 스레딩 힌트
+            try:
+                # PyAV 최신에서는 stream.codec_context 사용을 권장
+                cc = stream.codec_context
+                # AUTO 스레딩: FFmpeg가 자동 결정하도록
+                if decode_threads <= 0:
+                    cc.thread_type = "AUTO"
+                else:
+                    cc.thread_type = "FRAME"
+                    cc.thread_count = int(decode_threads)
+            except Exception:
+                pass
+
+            idx = 0
+            # demux → decode 루프
+            for packet in container.demux(stream):
+                for frame in packet.decode():
+                    img = _bgr_from_avframe(frame)
+                    if target_size:
+                        w, h = target_size
+                        if img.shape[1] != w or img.shape[0] != h:
+                            img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+                    q.put((idx, img))
+                    idx += 1
+
+            container.close()
+            q.put((-1, None))  # 정상 종료 sentinel
+        except Exception as e:
+            # 예외 시에도 안전하게 prefix 참조
+            print(f"{log_prefix} PyAV error: {e}", flush=True)
+            # → OpenCV 폴백
+            _worker_cv2()
+            return
 
     t = threading.Thread(target=_worker_pyav if _HAVE_PYAV else _worker_cv2, daemon=True)
     t.start()
