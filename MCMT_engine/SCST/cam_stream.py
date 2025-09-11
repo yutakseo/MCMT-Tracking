@@ -6,7 +6,7 @@ from typing import Optional, Union
 
 # CCTVStreamer가 있으면 우선 사용
 try:
-    from VideoStreamer.streamer_api import CCTVStreamer  # <- 당신이 준 모듈
+    from VideoStreamer.streamer_api import CCTVStreamer
     _HAS_CCTV = True
 except Exception:
     CCTVStreamer = None  # type: ignore

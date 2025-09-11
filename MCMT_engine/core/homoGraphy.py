@@ -1,8 +1,39 @@
-#/workspace/MCMT_engine/core/homoGraphy.py
+# /workspace/MCMT_engine/core/homoGraphy.py
 import os
 import cv2
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
+
+# ─────────────────────────────────────────────────────────
+# OpenCV 병렬/최적화 초기화
+#   - 기본 스레드 수: 24 (OPENCV_NUM_THREADS가 있으면 그 값 우선)
+#   - OpenCL 기본 OFF, 최적화 ON
+# ─────────────────────────────────────────────────────────
+def _init_cv_parallel() -> None:
+    try:
+        # 최적화 루틴 사용 (기본 ON)
+        use_opt = os.getenv("OPENCV_USE_OPTIMIZED", "1") not in ("0", "false", "False")
+        cv2.setUseOptimized(bool(use_opt))
+    except Exception:
+        pass
+
+    try:
+        # 스레드 수: env 없으면 기본 24
+        th_env = os.getenv("OPENCV_NUM_THREADS", "").strip()
+        th = int(th_env) if th_env else 24
+        if th > 0:
+            cv2.setNumThreads(th)
+    except Exception:
+        pass
+
+    try:
+        # OpenCL 기본 OFF (충돌 방지)
+        use_ocl = os.getenv("OPENCV_USE_OPENCL", "0") in ("1", "true", "True")
+        if hasattr(cv2, "ocl"):
+            cv2.ocl.setUseOpenCL(bool(use_ocl))
+    except Exception:
+        pass
+
 
 # 투영 결과 스키마:
 # {
@@ -29,6 +60,9 @@ class PlanProjector:
         plan_pts: List[Tuple[float, float]],
         ransac_thresh: float = 3.0,
     ) -> None:
+        # OpenCV 병렬/최적화 초기화 (전역)
+        _init_cv_parallel()
+
         # 1) 도면 이미지 로드
         if isinstance(plan_path, str):
             plan = cv2.imread(plan_path)
@@ -97,15 +131,30 @@ class PlanProjector:
         if self.H is None:
             raise RuntimeError("Homography not set. Failed initialization.")
 
-        out: List[Dict] = []
+        # 벡터화: bottom-center 좌표를 한 번에 투영
+        boxes, meta = [], []
         for d in dets_frame:
             bbox = d.get("bbox", d.get("box", d.get("tlwh", None)))
             if bbox is None:
                 continue
             x1, y1, x2, y2 = self._xyxy_from_any(bbox)
-            cx, cy = (x1 + x2) * 0.5, y2  # bottom-center
-            p = self._project_points(self.H, np.array([[cx, cy]], np.float32))[0]
+            boxes.append((x1, y1, x2, y2))
+            meta.append(d)
 
+        if not boxes:
+            return []
+
+        boxes = np.asarray(boxes, dtype=np.float32)
+        cx = (boxes[:, 0] + boxes[:, 2]) * 0.5
+        cy = boxes[:, 3]  # bottom y
+        pts = np.stack([cx, cy], axis=1)  # [N,2]
+
+        proj = self._project_points(self.H, pts)  # [N,2]
+
+        out: List[Dict] = []
+        for i, d in enumerate(meta):
+            x1, y1, x2, y2 = boxes[i]
+            p = proj[i]
             item = {
                 "id": int(d["id"]) if "id" in d and d["id"] is not None else None,
                 "cls": d.get("label", d.get("class", None)),
