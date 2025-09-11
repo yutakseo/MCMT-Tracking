@@ -2,13 +2,10 @@
 # 단일 videoSCST 인스턴스를 재사용하여 카메라 #1 → #2 → #3 순차 처리
 # - 카메라별 플랜(도면) 기준점 개수가 서로 달라도 OK (호출마다 plan_pts 오버라이드)
 # - 주석/줄바꿈 그대로 유지한 좌표 블록을 아래에 붙여 넣어 사용
-
 from __future__ import annotations
-import sys
+import os, sys, time
 from multiprocessing import freeze_support
-
 sys.path.append("/workspace")
-
 from MCMT_engine.SCST.video_SCST import videoSCST, Args
 
 
@@ -16,19 +13,28 @@ from MCMT_engine.SCST.video_SCST import videoSCST, Args
 # 사용자 설정
 # ─────────────────────────────────────────────────────────
 class VidArgs(Args):
-    track_thresh = 0.3
+    # 기존 트래킹 파라미터
+    track_thresh = 0.2
     match_thresh = 0.9
     track_buffer = 180
     mot20 = False
-    cpu_workers = 20    # 노트북/디버거면 1 권장
-    chunk_sec   = 10.0
-    batch_size  = 20
+    # 배치/파이프라인
+    batch_size     = 64       # GPU에 굵게
+    min_flush      = 64       # 64장 모일 때만 플러시
+    infer_timeout  = 0.0
+    cpu_workers    = 0        # 디코더 내부 스레드 사용 → 외부 cpu_workers는 0
+    chunk_sec      = 0.0      # 사용 안 함
+    # 새 디코더 파라미터 (core/video_stream.py 와 호환)
+    decode_threads   = 0     # 0=FFmpeg auto, 과하면 컨텍스트 스위칭 ↑
+    prefetch_frames  = 4096   # 여유 메모리 따라 128~4096
+    hwaccel          = "cuda" # 가능 시 NVDEC
+    decode_target_size = None # (w,h) 지정 시 디코더 단계에서 다운스케일
 
 # (1) 도면 이미지(공통)
 PLAN_IMG_PATH = "/workspace/assets/seocho/Seocho_plan_pts.png"
 
 # (2) 카메라별 '플랜(도면) 기준점'  ── 주석/줄바꿈 유지
-cam1_plan_pts = [
+CAM1_PLAN_PTS = [
     (1431,1198), #측정안전통로
     (1505,1256), #노란깃발
     (1486,1068), #철근아래
@@ -48,7 +54,7 @@ cam1_plan_pts = [
     (1219,1557), #빨간꼬깔
 ]
 
-cam2_plan_pts = [
+CAM2_PLAN_PTS = [
     (1597,625),  #저수지 계단 아래
     (1629,619),  #저수지 계단 위
     (2023,451),  #출입구 왼쪽
@@ -69,7 +75,7 @@ cam2_plan_pts = [
     (1915,942),  #작은저수지오른쪽코너
 ]
 
-cam3_plan_pts = [
+CAM3_PLAN_PTS = [
     (1597,627),  #저수지계단아래
     (1635,619),  #저수지계단위
     (1505,1256), #노란깃발
@@ -93,7 +99,7 @@ cam3_plan_pts = [
 ]
 
 # (3) 카메라별 'CCTV(영상) 기준점'  ── 주석/줄바꿈 유지
-cam1_pts = [
+CAM1_PTS = [
     (342,661),  #측정안전통로
     (733,657),  #노란깃발
     (266,567),  #철근아래
@@ -113,7 +119,7 @@ cam1_pts = [
     (961,717),  #빨간꼬깔
 ]
 
-cam2_pts = [
+CAM2_PTS = [
     (2,462),    #저수지 계단아래
     (25,420),   #저수지 계단 위
     (107,391),  #출입구 왼쪽
@@ -134,7 +140,7 @@ cam2_pts = [
     (728,459),  #작은저수지오른쪽코너
 ]
 
-cam3_pts = [
+CAM3_PTS = [
     (267,350),  #저수지계단아래
     (310,305),  #저수지계단위
     (104,706),  #노란깃발
@@ -162,71 +168,98 @@ VIDEO1 = "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #
 VIDEO2 = "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #2.mp4"
 VIDEO3 = "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #3.mp4"
 
-# (5) 결과 저장 경로
-OUT1_CAM = "/workspace/results/tracking_result1.mp4"
-OUT1_MAP = "/workspace/results/plan_result1.mp4"
 
-OUT2_CAM = "/workspace/results/tracking_result2.mp4"
-OUT2_MAP = "/workspace/results/plan_result2.mp4"
 
-OUT3_CAM = "/workspace/results/tracking_result3.mp4"
-OUT3_MAP = "/workspace/results/plan_result3.mp4"
 
-# (6) 사용 모델
-MODELS = ["ultra_people", "worker"]
+
+# (6) 사용 모델 (노트북에서 쓰던 키로 맞추기)
+DET_MODELS = ["ultra_best"]   # 필요 시 ["ultra_people", "worker"]로 교체 가능
+
+
+def _ensure_files():
+    miss = []
+    for p in (VIDEO1, VIDEO2, VIDEO3, PLAN_IMG_PATH):
+        if not os.path.exists(p):
+            miss.append(p)
+    if miss:
+        raise FileNotFoundError("다음 파일이 없습니다:\n- " + "\n- ".join(miss))
+    os.makedirs("/workspace/results", exist_ok=True)
 
 
 def main():
+    freeze_support()
+    _ensure_files()
+
+    print("[Init] videoSCST 초기화 중...")
     args = VidArgs()
 
-    # 노트북/디버거/Windows spawn 이슈 있으면 ↓ 1로 낮추고 돌리세요.
-    # args.cpu_workers = 1
-
-    # 인스턴스 1회 생성(Detector/Tracker 재사용) → 카메라별로 H만 다시 맞춰 처리
     scst = videoSCST(
+        plan_path=PLAN_IMG_PATH,    # videoSCST가 plan_path/plan_img_path 중 무엇을 받는지에 따라 둘 중 하나 사용
         args=args,
-        plan_img_path=PLAN_IMG_PATH,
-        plan_pts=cam1_plan_pts,         # 초기값(이후 호출에서 plan_pts로 덮어씀)
-        det_models=MODELS,
+        det_models=DET_MODELS,
+        det_device="cuda:0",
+        det_threshold=0.0,
+        det_use_async=True,
+        det_max_workers=1,
     )
+    print("[Init] videoSCST 초기화 완료")
+
+    t0 = time.time()
 
     # Cam #1
-    scst.track_and_save(
-        video_path=VIDEO1,
-        cctv_pts=cam1_pts,              # CCTV 기준점
-        plan_pts=cam1_plan_pts,         # 플랜 기준점 (호출마다 override)
+    print("\n[Cam1] 처리 시작...")
+    res1 = scst.track_and_save(
+        video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #1.mp4",
+        cam_pts=CAM1_PTS,                 # 노트북 성공 시그니처: cam_pts
+        plan_pts=CAM1_PLAN_PTS,
         plan_img_path=PLAN_IMG_PATH,
-        camera_save_path=OUT1_CAM,
-        plan_save_path=OUT1_MAP,
-        plan_mode="bottom-center",
+        camera_save_path="/workspace/results/tracking_result1.mp4",
+        plan_save_path="/workspace/results/plan_result1.mp4",
         cam_trail_len=30,
+        plan_stride=1,                    # 저장 부하/용량 제어
+        inplace_clear=True,               # 메모리 즉시 해제
     )
+    print(f"[Cam1] 완료: {len(res1)} frames")
 
     # Cam #2
-    scst.track_and_save(
-        video_path=VIDEO2,
-        cctv_pts=cam2_pts,
-        plan_pts=cam2_plan_pts,
+    print("\n[Cam2] 처리 시작...")
+    res2 = scst.track_and_save(
+        video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #2.mp4",
+        cam_pts=CAM2_PTS,
+        plan_pts=CAM2_PLAN_PTS,
         plan_img_path=PLAN_IMG_PATH,
-        camera_save_path=OUT2_CAM,
-        plan_save_path=OUT2_MAP,
-        plan_mode="bottom-center",
+        camera_save_path="/workspace/results/tracking_result2.mp4",
+        plan_save_path="/workspace/results/plan_result2.mp4",
         cam_trail_len=30,
+        plan_stride=1,
+        inplace_clear=True,
     )
+    print(f"[Cam2] 완료: {len(res2)} frames")
 
     # Cam #3
-    scst.track_and_save(
-        video_path=VIDEO3,
-        cctv_pts=cam3_pts,
-        plan_pts=cam3_plan_pts,
+    print("\n[Cam3] 처리 시작...")
+    res3 = scst.track_and_save(
+        video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #3.mp4",
+        cam_pts=CAM3_PTS,
+        plan_pts=CAM3_PLAN_PTS,
         plan_img_path=PLAN_IMG_PATH,
-        camera_save_path=OUT3_CAM,
-        plan_save_path=OUT3_MAP,
-        plan_mode="bottom-center",
+        camera_save_path="/workspace/results/tracking_result3.mp4",
+        plan_save_path="/workspace/results/plan_result3.mp4",
         cam_trail_len=30,
+        plan_stride=1,
+        inplace_clear=True,
     )
+    print(f"[Cam3] 완료: {len(res3)} frames")
+
+    dt = time.time() - t0
+    total_frames = len(res1) + len(res2) + len(res3)
+    fps = (total_frames / dt) if dt > 0 else 0.0
 
     print("\n[DONE] All cameras processed.")
+    print(f"총 처리 시간: {dt:.2f}초")
+    print(f"총 처리 프레임: {total_frames:,}개")
+    print(f"평균 처리 속도: {fps:.1f} FPS")
+    print("결과 저장 위치: /workspace/results/")
 
 
 if __name__ == "__main__":
