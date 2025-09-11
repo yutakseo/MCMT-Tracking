@@ -1,4 +1,4 @@
-#/workspace/MCMT_engine/core/homoGraphy_renderer.py
+#/workspace/MCMT_engine/core/renderer.py
 import os
 import cv2
 import numpy as np

@@ -39,6 +39,7 @@ class DetectionAPI:
         use_async: bool = True,
         max_workers: Optional[int] = None,
     ):
+        print("DetectionAPI activate")
         self.device = device
         self.detector = EnsembleDetector(
             thres=thres,
@@ -88,6 +89,7 @@ class DetectionAPI:
     # 컨텍스트/리소스
     # ----------------------------
     def close(self):
+        print("DetectionAPI : close")
         self.detector.close()
 
     def __enter__(self):
@@ -116,6 +118,7 @@ class DetectionAPI:
         ], device='cuda:0')
         """
     def detect(self, image: np.ndarray) -> torch.Tensor:
+        print("DetectionAPI : Detection..")
         if not isinstance(image, np.ndarray):
             raise TypeError("image must be a numpy.ndarray (BGR).")
         results = self.detector.detect(image)  # list of dicts(표준 스키마)
@@ -125,6 +128,7 @@ class DetectionAPI:
     # 추론: 배치 (프레임 리스트)
     # ----------------------------
     def detect_batch(self, images: List[np.ndarray]) -> List[torch.Tensor]:
+        print("DetectionAPI : Batch Detection..")
         if not isinstance(images, list) or not images:
             return []
         per_frame_results: List[List[Dict[str, Any]]] = self.detector.detect_batch(images)
@@ -134,6 +138,7 @@ class DetectionAPI:
     # 추론: 원시 dict (단일 프레임)
     # ----------------------------
     def detect_raw(self, image: np.ndarray) -> List[Dict[str, Any]]:
+        print("DetectionAPI : Raw Detection..")
         """
         Returns:
             [{"class_id": int, "label": str, "score": float,

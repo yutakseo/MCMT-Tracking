@@ -1,27 +1,14 @@
-# === Import (새 클래스 우선, 실패 시 폴백) ===
 import time
-import torch
 from MCMT_engine.SCST.video_SCST import videoSCST
 from __Detection.detection_api import DetectionAPI
 from __Tracking.tracking_api import TrackerAPI
-from MCMT_engine.core.homoGraphy import PlanProjector
 
-# === 최적화된 Args ===
-class Args:
-    track_thresh = 0.3
-    match_thresh = 0.9
-    track_buffer = 180
-    mot20 = False
-    cpu_workers = 16   # 최적화: 20 → 16
-    chunk_sec = 30.0   # 최적화: 10 → 30 (더 큰 청크)
-    batch_size = 64    # 최적화: 20 → 64 (더 큰 배치)
 
-args = Args()
 
 # 1) 도면 이미지 경로 (공통)
 plan_path = "/workspace/assets/seocho/Seocho_plan_pts.png"
 
-# 2) 카메라별 도면 기준점 (PLAN)  ── 주석/줄바꿈 유지
+# 2) 카메라별 도면 기준점 (PLAN)
 cam1_plan_pts = [
     (1431,1198), #측정안전통로
     (1505,1256), #노란깃발
@@ -86,7 +73,7 @@ cam3_plan_pts = [
     (1568,377),  #직원휴게실오른쪽
 ]
 
-# 3) 카메라별 영상 좌표 (CCTV)  ── 주석/줄바꿈 유지
+# 3) 카메라별 영상 좌표 (CCTV)
 cam1_pts = [
     (342,661),  #측정안전통로
     (733,657),  #노란깃발
@@ -151,137 +138,79 @@ cam3_pts = [
     (192,291),  #직원휴게실오른쪽
 ]
 
-def main():
-    start_time = time.time()
-    print("🚀 멀티카메라 비디오 처리 시작 (최적화 버전)")
-    
-    # GPU 메모리 최적화
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.backends.cudnn.benchmark = True
-        print(f"✅ GPU 최적화 완료: {torch.cuda.get_device_name()}")
-    
-    # =============================================================================
-    # 1. 공유 모델 인스턴스 생성 (한 번만!)
-    # =============================================================================
-    print("📦 공유 모델 초기화 중...")
-    model_init_start = time.time()
-    
-    # 공유 객체탐지 모델
-    shared_detector = DetectionAPI(
-        models=["ultra_people", "worker"],
-        thres=0.0,
-        device="cuda:0",
-        use_async=True,
-        max_workers=1
-    )
-    
-    # 공유 추적기 모델
-    shared_tracker = TrackerAPI(args=args, detector=shared_detector)
-    
-    # 공유 호모그래피 인스턴스 (임시로 첫 번째 카메라 포인트 사용)
-    shared_projector = PlanProjector(
-        plan_img_or_path=plan_path,
-        image_pts=cam1_pts,
-        plan_pts=cam1_plan_pts,
-    )
-    
-    model_init_time = time.time() - model_init_start
-    print(f"✅ 공유 모델 초기화 완료 ({model_init_time:.2f}초)")
-    
-    # =============================================================================
-    # 2. 호모그래피 미리 계산 (캐싱)
-    # =============================================================================
-    print("🎯 호모그래피 캐싱 중...")
-    homography_cache = {}
-    
-    camera_configs = [
-        (cam1_pts, cam1_plan_pts, "Camera 1"),
-        (cam2_pts, cam2_plan_pts, "Camera 2"), 
-        (cam3_pts, cam3_plan_pts, "Camera 3")
-    ]
-    
-    for i, (cctv_pts, plan_pts, cam_name) in enumerate(camera_configs):
-        H, _ = shared_projector.fit_homography(cctv_pts, plan_pts)
-        homography_cache[i] = H
-        print(f"✅ {cam_name} 호모그래피 계산 완료")
-    
-    # =============================================================================
-    # 3. 각 카메라별 처리 (공유 모델 사용)
-    # =============================================================================
-    video_paths = [
-        "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #1.mp4",
-        "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #2.mp4",
-        "/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #3.mp4",
-    ]
-    
-    results = []
-    
-    for i, (video_path, (cctv_pts, plan_pts, cam_name)) in enumerate(zip(video_paths, camera_configs)):
-        print(f"\n📹 {cam_name} 처리 시작...")
-        cam_start = time.time()
-        
-        # videoSCST 인스턴스 생성 (공유 모델 주입)
-        scst = videoSCST(
-            args=args,
-            plan_img_path=plan_path,
-            plan_pts=plan_pts,
-            det_models=["ultra_people", "worker"]
-        )
-        
-        # 공유 모델들로 교체
-        scst.detector = shared_detector
-        scst.tracker = shared_tracker
-        scst.projector = shared_projector
-        
-        # 캐시된 호모그래피 설정
-        scst.H = homography_cache[i]
-        scst._last_cctv_pts = list(cctv_pts)
-        scst._last_plan_pts = list(plan_pts)
-        scst._last_H = homography_cache[i]
-        
-        # 비디오 처리
-        result = scst.track_and_save(
-            video_path=video_path,
-            cam_pts=cctv_pts,
-            plan_pts=plan_pts,
-            plan_img_path=plan_path,
-            camera_save_path=f"/workspace/results/tracking_result{i+1}.mp4",
-            plan_save_path=f"/workspace/results/plan_result{i+1}.mp4",
-        )
-        
-        results.append(result)
-        cam_time = time.time() - cam_start
-        print(f"✅ {cam_name} 처리 완료 ({cam_time:.2f}초, {len(result)} 프레임)")
-    
-    # =============================================================================
-    # 4. 결과 요약
-    # =============================================================================
-    total_time = time.time() - start_time
-    total_frames = sum(len(r) for r in results)
-    
-    print(f"\n🎉 모든 카메라 처리 완료!")
-    print(f"⏱️  총 처리 시간: {total_time:.2f}초")
-    print(f"📊 총 처리 프레임: {total_frames:,}개")
-    print(f"🚀 평균 처리 속도: {total_frames/total_time:.1f} FPS")
-    print(f"💾 결과 저장 위치: /workspace/results/")
-    
-    # 리소스 정리
-    try:
-        shared_detector.close()
-        print("🧹 리소스 정리 완료")
-    except Exception as e:
-        print(f"⚠️  리소스 정리 중 오류: {e}")
+
+class Args:
+    track_thresh = 0.3
+    match_thresh = 0.9
+    track_buffer = 180
+    mot20 = False
+    cpu_workers = 16   # 최적화: 20 → 16
+    chunk_sec = 30.0   # 최적화: 10 → 30 (더 큰 청크)
+    batch_size = 20    # 최적화: 20 → 64 (더 큰 배치)
+
+args = Args()
 
 
+detector = DetectionAPI(
+    models=["ultra_best", "worker"],
+    thres=0.0,
+    device="cuda:0",
+    use_async=True,
+    max_workers=1,
+)
+tracker = TrackerAPI(args=args, detector=detector)
 
+# 인스턴스 1개만 생성
+scst = videoSCST(
+    plan_path=plan_path,
+    args=args,
+    detector=detector,
+    tracker=tracker,
+    ransac_thresh=3.0,
+)
 
-if __name__ == "__main__":
-    # Windows/Spawn 대비(얼어붙인 실행파일 아닐 때는 없어도 무방)
-    try:
-        from multiprocessing import freeze_support
-        freeze_support()
-    except Exception:
-        pass
+# ── Camera 1 ──
+start = time.time()
+res1 = scst.track_and_save(
+    video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #1.mp4",
+    cam_pts=cam1_pts,
+    plan_pts=cam1_plan_pts,
+    plan_img_path=plan_path,  # projector 생성/갱신
+    camera_save_path="/workspace/results/tracking_result1.mp4",
+    plan_save_path="/workspace/results/plan_result1.mp4",
+    cam_trail_len=30,
+    ransac_thresh=3.0,
+)
+print(f"Camera 1 처리 완료 ({time.time()-start:.2f}초, {len(res1)} 프레임)")
 
-    main()
+# ── Camera 2 ──
+start = time.time()
+res2 = scst.track_and_save(
+    video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #2.mp4",
+    cam_pts=cam2_pts,
+    plan_pts=cam2_plan_pts,
+    plan_img_path=plan_path,  # 동일 도면이므로 계속 전달(안전)
+    camera_save_path="/workspace/results/tracking_result2.mp4",
+    plan_save_path="/workspace/results/plan_result2.mp4",
+    cam_trail_len=30,
+    ransac_thresh=3.0,
+)
+print(f"Camera 2 처리 완료 ({time.time()-start:.2f}초, {len(res2)} 프레임)")
+
+# ── Camera 3 ──
+start = time.time()
+res3 = scst.track_and_save(
+    video_path="/workspace/datasets/250909_Site_seocho/2025-09-09 13_29_59 이동형 #3.mp4",
+    cam_pts=cam3_pts,
+    plan_pts=cam3_plan_pts,
+    plan_img_path=plan_path,  # 동일 도면
+    camera_save_path="/workspace/results/tracking_result3.mp4",
+    plan_save_path="/workspace/results/plan_result3.mp4",
+    cam_trail_len=30,
+    ransac_thresh=3.0,
+)
+print(f"Camera 3 처리 완료 ({time.time()-start:.2f}초, {len(res3)} 프레임)")
+
+# 요약
+total_frames = len(res1) + len(res2) + len(res3)
+print(f"총 처리 프레임: {total_frames}")
