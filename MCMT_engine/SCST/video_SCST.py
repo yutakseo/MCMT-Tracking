@@ -263,7 +263,7 @@ class videoSCST:
                 canvas = renderer.render_frame(det_like)
                 vw.write(canvas)
                 written += 1
-                if written % 200 == 0:
+                if written % 100 == 0:
                     print(f"[SCST] plan-encode(online): progress {written} frames written")
 
             # 2-3) 소비 루프 시작 (별 스레드)

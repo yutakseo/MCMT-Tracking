@@ -89,7 +89,7 @@ class ReorderEmitter:
     프레임 순서 보장용 소형 리오더 버퍼.
     proj_q에서 오는 ProjItem을 frame_id 순서에 맞춰 sink로 전달.
     """
-    def __init__(self, start_frame_id: int, emit_fn, max_hold: int = 256):
+    def __init__(self, start_frame_id: int, emit_fn, max_hold: int = 64):
         self.next_to_emit = start_frame_id
         self.buf: Dict[int, ProjItem] = {}
         self.emit_fn = emit_fn
@@ -124,7 +124,7 @@ class OnlineProjectionPipeline:
     def __init__(
         self,
         projector: PlanProjector,
-        max_queue: int = 512,
+        max_queue: int = 64,
     ):
         self.det_q: queue.Queue = queue.Queue(maxsize=max_queue)
         self.proj_q: queue.Queue = queue.Queue(maxsize=max_queue)
