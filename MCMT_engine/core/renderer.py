@@ -16,13 +16,13 @@ class PlanRenderer:
         self,
         plan_img_or_path: Union[str, np.ndarray],
         color_fn: Optional[Callable[[Dict], Tuple[int, int, int]]] = None,
-        point_radius: int = 20,
+        point_radius: int = 7,
         line_thickness: int = 2,
         text_scale: float = 0.5,
         text_thickness: int = 1,
         text_margin: int = 2,
         draw_trails: bool = False,
-        trail_len: int = 60,
+        trail_len: int = 120,
         trail_ttl: Optional[int] = 30,
     ) -> None:
         if isinstance(plan_img_or_path, str):
