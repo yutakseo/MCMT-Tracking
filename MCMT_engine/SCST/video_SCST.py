@@ -1,16 +1,19 @@
 # /workspace/MCMT_engine/SCST/video_SCST.py
 from __future__ import annotations
 import os, cv2, numpy as np, threading
-from typing import List, Dict, Any, Optional, Tuple, Iterable
+from typing import List, Dict, Any, Optional, Tuple, Iterable, Callable
 from time import perf_counter as _t
 
 from __Detection.detection_api import DetectionAPI
 from __Tracking.tracking_api import TrackerAPI
 from MCMT_engine.core.homoGraphy import PlanProjector
 from MCMT_engine.core.renderer import PlanRenderer
-
-# ★ 추가: 온라인 투영 파이프라인
 from MCMT_engine.core.online_projection import OnlineProjectionPipeline, ProjItem
+
+# 🔹 스트리밍/배치/저장 파이프라인
+from MCMT_engine.core.stream_track_encode import StreamTrackEncode
+# 🔹 디코더(스트리머) 팩토리
+from MCMT_engine.core.video_stream import stream_factory_from_args
 
 
 class Args:
@@ -19,17 +22,17 @@ class Args:
     match_thresh = 0.5
     track_buffer = 60
     mot20 = False
-
     # --- 배치 / 추론 ---
     batch_size = 20
+    infer_timeout = 0.20
+    min_flush = None  # None이면 max(2, batch_size//2)
 
-    # --- 디코더(TrackerAPI에서 사용) ---
-    # decode_threads가 None이면 cpu_workers를 사용(하위호환)
+    # --- 디코더(스트리머에서 사용) ---
     cpu_workers = 10
-    decode_threads = None         # 권장: 0(FFmpeg 자동) 또는 CPU 상황에 맞게 정수
-    prefetch_frames = 512         # 128~4096 사이에서 메모리 상황에 맞게
+    decode_threads = None         # None이면 cpu_workers 사용
+    prefetch_frames = 512
     hwaccel = None                # 'cuda' / None
-    decode_target_size = None     # (width, height) 지정 시 디코더에서 다운스케일
+    decode_target_size = None     # (w, h)
 
     # --- 구버전 호환(미사용) ---
     chunk_sec = 10.0
@@ -37,9 +40,11 @@ class Args:
 
 class videoSCST:
     """
-    - calibrate() : 카메라-도면 간 호모그래피 추정/캐시
-    - track_and_save() : TrackerAPI를 사용해 추적(카메라 비디오 저장 optional) + 도면 위 렌더링 optional
-      ※ plan_save_path가 지정되면 '온라인 투영/인코딩'으로 진행(배치마다 즉시 반영)
+    역할:
+      - calibrate(): 카메라-도면 H 추정/캐시
+      - track_and_save(): 스트리머→(Detector,TrackerAPI)→StreamTrackEncode 파이프라인
+        * camera_save_path 지정 시 카메라 영상 오버레이 저장
+        * plan_save_path 지정 시 OnlineProjectionPipeline으로 도면 영상 동시 저장
     """
     def __init__(
         self,
@@ -47,7 +52,6 @@ class videoSCST:
         args: Optional[Args] = None,
         detector: Optional[DetectionAPI] = None,
         tracker: Optional[TrackerAPI] = None,
-        *,
         det_models: Optional[List[str]] = None,
         det_device: str = "cuda",
         det_threshold: float = 0.0,
@@ -83,11 +87,14 @@ class videoSCST:
 
         # --- Tracker (주입 우선) ---
         if tracker is None:
-            print("[SCST] __init__: create TrackerAPI")
+            print("[SCST] __init__: create TrackerAPI (thin)")
             self.tracker = TrackerAPI(args=self.args, detector=self.detector)
         else:
             print("[SCST] __init__: use injected tracker")
             self.tracker = tracker
+
+        # --- 스트리머 준비 ---
+        self.streamer = stream_factory_from_args(self.args)
 
         # --- 상태/캐시 ---
         self.projector: Optional[PlanProjector] = None
@@ -197,8 +204,8 @@ class videoSCST:
         cam_trail_len: int = 30,
         ransac_thresh: Optional[float] = None,
         # 도면 저장 최적화
-        plan_stride: int = 1,          # 2~3으로 올리면 도면 저장 부하/용량 감소
-        inplace_clear: bool = True,    # (오프라인 경로 전용) True면 results[fi]를 즉시 None으로 해제
+        plan_stride: int = 1,
+        inplace_clear: bool = True,   # (오프라인 경로 전용)
     ):
         if not os.path.exists(video_path):
             raise FileNotFoundError(video_path)
@@ -211,9 +218,7 @@ class videoSCST:
             plan_img_path=plan_img_path,
         )
 
-        # ─────────────────────────────────────────────────────────
         # 2) (선택) 온라인 도면 투영/인코딩 준비
-        # ─────────────────────────────────────────────────────────
         online = None
         vw = None
         renderer = None
@@ -249,8 +254,8 @@ class videoSCST:
 
                 pts = item.pts_plan
                 n = len(pts)
-                ids = (item.ids.tolist() if isinstance(item.ids, np.ndarray) else (item.ids or [None]*n))
-                clss = item.clss or [None]*n
+                ids = (item.ids.tolist() if isinstance(item.ids, np.ndarray) else (item.ids or [None] * n))
+                clss = item.clss or [None] * n
 
                 det_like = []
                 for i in range(n):
@@ -258,7 +263,7 @@ class videoSCST:
                         "id": int(ids[i]) if ids[i] is not None else None,
                         "cls": clss[i],
                         "bbox": item.boxes_xyxy[i].astype(float).tolist(),
-                        "pt": (float(pts[i,0]), float(pts[i,1])),
+                        "pt": (float(pts[i, 0]), float(pts[i, 1])),
                     })
                 canvas = renderer.render_frame(det_like)
                 vw.write(canvas)
@@ -282,30 +287,54 @@ class videoSCST:
         else:
             _on_det = None
 
-        # ─────────────────────────────────────────────────────────
-        # 3) 디코딩+디텍션+트래킹 (카메라 영상 저장 여부 선택)
-        # ─────────────────────────────────────────────────────────
+        # 3) 스트리밍+배치+저장 파이프라인 구성
         print("[SCST] tracking: begin (streaming decoder → detect & associate in TrackerCore)")
         t1 = _t()
+
+        pipe = StreamTrackEncode(
+            tracker=self.tracker,
+            batch_size=int(getattr(self.args, "batch_size", 20)),
+            infer_timeout=float(getattr(self.args, "infer_timeout", 0.20)),
+            min_flush=getattr(self.args, "min_flush", None),
+        )
+
+        # 카메라 오버레이(선택)
+        visualize_fn: Optional[Callable[[np.ndarray, List[Dict[str, Any]]], np.ndarray]] = None
         if camera_save_path:
-            print(f"[SCST] tracking: with camera visualization → {camera_save_path}")
-            results = self.tracker.track_video(
-                video_path=video_path, save_path=camera_save_path, trail_len=cam_trail_len,
-                on_detection=_on_det,
-            )
-        else:
-            print("[SCST] tracking: no camera visualization")
-            # 가능하면 track_video를 통일해서 on_detection 사용, 여기선 저장 없으니 save_path=None
-            results = self.tracker.track_video(
-                video_path=video_path, save_path=None, trail_len=cam_trail_len,
-                on_detection=_on_det,
-            )
+            # TrackerAPI가 가진 시각화기(있다면) 활용, 없으면 간단 오버레이 함수 주입
+            if hasattr(self.tracker, "visualizer"):
+                viz = self.tracker.visualizer
+                visualize_fn = lambda f, r: viz.draw_frame(f, r, trail_len=int(min(cam_trail_len, 1000)))
+            else:
+                # 최소 안전 시각화(박스만)
+                def _simple_viz(f: np.ndarray, r: List[Dict[str, Any]]):
+                    out = f.copy()
+                    for d in r:
+                        b = d.get("bbox")
+                        if b is None: continue
+                        # tlwh → xyxy 변환
+                        x, y, w, h = b
+                        x1, y1, x2, y2 = int(x), int(y), int(x + w), int(y + h)
+                        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    return out
+                visualize_fn = _simple_viz
+
+        writer_size = getattr(self.args, "decode_target_size", None)
+        writer_fps = self._get_fps(video_path)
+
+        results = pipe.run_stream(
+            stream_fn=self.streamer,
+            video_path=video_path,
+            on_detection=_on_det,
+            visualize_fn=visualize_fn,
+            save_path=camera_save_path,
+            writer_size=writer_size,
+            writer_fps=writer_fps,
+        )
         track_time = _t() - t1
         print(f"[SCST] tracking: done in {track_time:.3f}s, frames={len(results)}")
 
-        # ─────────────────────────────────────────────────────────
         # 4) 마무리 (온라인 경로 정리)
-        # ─────────────────────────────────────────────────────────
         if online is not None:
             online.stop_and_join()
             if consumer_th is not None and consumer_th.is_alive():
@@ -314,7 +343,7 @@ class videoSCST:
                 vw.release()
                 print(f"[SCST] plan-encode(online): done, written={written}, out={plan_save_path}")
 
-        # (참고) 오프라인 경로가 필요하면 아래 블록을 활성화하면 됨:
+        # (참고) 오프라인 경로가 필요하면 아래 블록을 활성화:
         # if plan_save_path and _on_det is None:
         #     self._encode_plan_offline(results, video_path, plan_img_path, cam_trail_len, plan_save_path, plan_stride, inplace_clear)
 
@@ -372,5 +401,6 @@ class videoSCST:
         if hasattr(self.detector, "close"):
             try:
                 self.detector.close()
+                self.tracker.reset()
             except Exception:
                 pass

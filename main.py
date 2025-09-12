@@ -1,7 +1,7 @@
 # /workspace/main.py
 import asyncio
 from typing import Optional, List
-from tools.web.app import MultiCameraWebApp
+from Thirdparty_tools.web.app import MultiCameraWebApp
 
 async def main(detector_models: Optional[List[str]] = None):
     app = MultiCameraWebApp(detector_models=detector_models, draw_mode="auto")
