@@ -9,10 +9,11 @@ from __Tracking.tracking_api import TrackerAPI
 from MCMT_engine.core.homoGraphy import PlanProjector
 from MCMT_engine.core.renderer import PlanRenderer
 from MCMT_engine.core.online_projection import OnlineProjectionPipeline, ProjItem
+from MCMT_engine.visualization.visualizer_track import TrackerVisualizer
 
-# 🔹 스트리밍/배치/저장 파이프라인
+#스트리밍/배치/저장 파이프라인
 from MCMT_engine.core.stream_track_encode import StreamTrackEncode
-# 🔹 디코더(스트리머) 팩토리
+#디코더(스트리머) 팩토리
 from MCMT_engine.core.video_stream import stream_factory_from_args
 
 
@@ -92,6 +93,10 @@ class videoSCST:
         else:
             print("[SCST] __init__: use injected tracker")
             self.tracker = tracker
+
+        #시각화기 주입 (항상 라벨/ID/스코어 출력되도록)
+        # TrackerAPI에 visualizer 속성이 없을 수 있으므로 안전하게 할당
+        setattr(self.tracker, "visualizer", TrackerVisualizer())
 
         # --- 스트리머 준비 ---
         self.streamer = stream_factory_from_args(self.args)
@@ -298,12 +303,16 @@ class videoSCST:
             min_flush=getattr(self.args, "min_flush", None),
         )
 
+        # 파이프라인 시작 전 궤적 초기화(누적 방지)
+        if hasattr(self.tracker, "visualizer"):
+            self.tracker.visualizer.reset()
+
         # 카메라 오버레이(선택)
         visualize_fn: Optional[Callable[[np.ndarray, List[Dict[str, Any]]], np.ndarray]] = None
         if camera_save_path:
-            # TrackerAPI가 가진 시각화기(있다면) 활용, 없으면 간단 오버레이 함수 주입
-            if hasattr(self.tracker, "visualizer"):
-                viz = self.tracker.visualizer
+            # TrackerAPI가 가진 시각화기(있다면) 활용
+            viz = getattr(self.tracker, "visualizer", None)
+            if viz is not None:
                 visualize_fn = lambda f, r: viz.draw_frame(f, r, trail_len=int(min(cam_trail_len, 1000)))
             else:
                 # 최소 안전 시각화(박스만)
