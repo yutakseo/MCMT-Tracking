@@ -14,11 +14,11 @@ from dataclasses import dataclass
 # =========================
 # CONFIG: 여기만 바꿔주세요
 # =========================
-INPUT_LEFT   = r"D:\videos\merged_out_vertical.mp4"   # 왼쪽 영상
-INPUT_RIGHT  = r"D:\videos\merged_out_vertical+2.mp4"  # 오른쪽 영상
-OUTPUT       = r"D:\videos\merged_cam#3.mp4"
+INPUT_LEFT   = r"/workspace/results/tracking_result3new.mp4"   # 왼쪽 영상
+INPUT_RIGHT  = r"/workspace/results/plan_result3.mp4"  # 오른쪽 영상
+OUTPUT       = r"/workspace/results/cam#3.mp4"
 
-TARGET_HEIGHT = 2160          # 출력 세로(px). 0이면 입력 중 가장 작은 세로
+TARGET_HEIGHT = 1080          # 출력 세로(px). 0이면 입력 중 가장 작은 세로
 MODE = "longest"             # "longest": 가장 긴 영상 끝까지, "shortest": 가장 짧은 영상에 맞춰 종료
 PAD = "last"                 # "last": 마지막 프레임 유지, "black": 검정화면
 OUTPUT_FPS = 0.0             # 0이면 입력 FPS들의 "최솟값" 사용, 0보다 크면 고정 FPS
